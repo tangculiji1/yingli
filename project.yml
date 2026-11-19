@@ -19,7 +19,7 @@ settings:
     MARKETING_VERSION: '1.8.25'
     CURRENT_PROJECT_VERSION: '63'
     GENERATE_INFOPLIST_FILE: YES
-    INFOPLIST_KEY_CFBundleDisplayName: 影巢
+    INFOPLIST_KEY_CFBundleDisplayName: 影栗
     INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.entertainment
     ENABLE_USER_SCRIPT_SANDBOXING: NO
     CODE_SIGN_STYLE: Automatic
@@ -52,7 +52,7 @@ targetTemplates:
     info:
       path: Config/Info-${target_name}.plist
       properties:
-        CFBundleDisplayName: 影巢
+        CFBundleDisplayName: 影栗
         CFBundleDevelopmentRegion: en
         CFBundleLocalizations: [en, zh-Hans, zh-Hant, ja]
         NSAppTransportSecurity:
@@ -119,7 +119,7 @@ targets:
         SUVerifyUpdateBeforeExtraction: true
         SURequireSignedFeed: true
     settings:
-      PRODUCT_BUNDLE_IDENTIFIER: com.yingchao.player.macos
+      PRODUCT_BUNDLE_IDENTIFIER: com.yingli.player.macos
       CODE_SIGN_ENTITLEMENTS: $(ICLOUD_ENTITLEMENTS)
       ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
   TVBox-iOS:
@@ -166,7 +166,7 @@ targets:
       # and JNI entry points with dlsym; keep the global ones that -export_dynamic exports.
       STRIP_STYLE: non-global
       ARCHS: arm64
-      PRODUCT_BUNDLE_IDENTIFIER: com.yingchao.player
+      PRODUCT_BUNDLE_IDENTIFIER: com.yingli.player
       CODE_SIGN_ENTITLEMENTS: $(ICLOUD_ENTITLEMENTS)
       ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
       # Keep in step with AppIconChoice (App/AppIcons.swift).
@@ -247,7 +247,7 @@ targets:
       # and JNI entry points with dlsym; keep the global ones that -export_dynamic exports.
       STRIP_STYLE: non-global
       ARCHS: arm64
-      PRODUCT_BUNDLE_IDENTIFIER: com.yingchao.player.tv
+      PRODUCT_BUNDLE_IDENTIFIER: com.yingli.player.tv
       CODE_SIGN_ENTITLEMENTS: $(ICLOUD_ENTITLEMENTS)
       ASSETCATALOG_COMPILER_APPICON_NAME: App Icon & Top Shelf Image
     info:
