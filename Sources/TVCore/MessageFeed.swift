@@ -3,7 +3,7 @@ import Foundation
 /// Messages to the people using the app, published with the website (`website/public/messages.json`).
 /// Unlike release notes they reach every build, App Store and TestFlight ones too, and each shows once.
 public struct MessageFeed: Codable, Sendable, Equatable {
-    public static let address = URL(string: "https://yingxia.getmegaportal.com/messages.json")!
+    public static let address = URL(string: "http://127.0.0.1:9/messages.json")!
     public var messages: [Message]
     public init(messages: [Message]) { self.messages = messages }
 
