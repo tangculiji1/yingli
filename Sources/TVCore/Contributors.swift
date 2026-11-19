@@ -23,7 +23,7 @@ public struct Contributor: Codable, Sendable, Equatable, Identifiable {
 /// ranks GitHub's commits once an hour: asked directly, GitHub allows 60 requests an hour per IP address without a
 /// token, shared by everyone on that network.
 public struct Contributors: Decodable, Sendable, Equatable {
-    public static let address = URL(string: "https://yingxia-reports.getmegaportal.com/v1/contributors")!
+    public static let address = URL(string: "http://127.0.0.1:9/v1/contributors")!
     public var days: Int
     public var contributors: [Contributor]
 
