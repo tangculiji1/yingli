@@ -3,7 +3,7 @@ import Foundation
 /// Release announcements published with the website (`website/public/releases.json`).
 /// The apps bundle a copy too, so "What's New" works offline right after an update.
 public struct ReleaseFeed: Codable, Sendable, Equatable {
-    public static let address = URL(string: "https://yingxia.getmegaportal.com/releases.json")!
+    public static let address = URL(string: "http://127.0.0.1:9/releases.json")!
     public var releases: [Release]
     /// The build TestFlight testers can install now, keyed by `ReleaseFeed.platform`. Every TestFlight build is
     /// called 1.7.7 and carries the build number of the release it was made from, so builds are what compare;
@@ -68,7 +68,7 @@ public struct ReleaseFeed: Codable, Sendable, Equatable {
     /// a feed's entry has a single download, so Apple silicon and Intel Macs read different files.
     public static var appcastAddress: URL { appcastAddress(intelMac: isIntelMac) }
     public static func appcastAddress(intelMac: Bool) -> URL {
-        URL(string: "https://yingxia.getmegaportal.com/appcast/macos-\(intelMac ? "x86_64" : "arm64").xml")!
+        URL(string: "http://127.0.0.1:9/appcast/macos-\(intelMac ? "x86_64" : "arm64").xml")!
     }
 
     /// The key of the Intel Mac package in `Release.links` (from 1.7.3 on).
