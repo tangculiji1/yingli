@@ -83,15 +83,15 @@ cider sign Yingxia-ios-unsigned.ipa --apple-id --install --refresh
 ## 改名字、图标、包名
 
 - **显示名称**：`project.yml` 里的 `CFBundleDisplayName`（两处），以及 `Config/Info-TVBox-*.plist`。
-- **包名**：`project.yml` 里的 `PRODUCT_BUNDLE_IDENTIFIER`（macOS / iOS / tvOS 各一处）。现在的 iOS 包名是 `com.yingchao.player`，和原版不同，所以能和原版同时装。
+- **包名**：`project.yml` 里的 `PRODUCT_BUNDLE_IDENTIFIER`（macOS / iOS / tvOS 各一处）。现在的 iOS 包名是 `com.yingli.player`，和原版不同，所以能和原版同时装。
 - **图标**：`Config/iOS/Assets.xcassets/AppIcon.appiconset/`，换掉里面的 PNG 即可，尺寸要和 `Contents.json` 对上。
 
 ## 这一版动了什么
 
-- 显示名称改为「影巢」，包名改为 `com.yingchao.player`，不会和原版冲突。
+- 显示名称改为「影栗」，包名改为 `com.yingli.player`，不会和原版冲突。
 - 关闭了对原作者服务器的依赖：错误上报、反馈、公告、版本更新检查现在都指向本机空地址（`127.0.0.1:9`），不会把你的数据发出去。
 - **保留**了 TMDB 元数据代理（`yingxia-tmdb.getmegaportal.com`），它只用来取海报和剧集信息；不想要可以在 `Sources/TVCore/TMDBMatch.swift` 里改掉，代价是封面和简介没了。
-- 版权行改为「© 2026 影巢 · 基于 Yingxia（GPL-3.0）」，`LICENSE` 原样保留。
+- 版权行改为「© 2026 影栗 · 基于 Yingxia（GPL-3.0）」，`LICENSE` 原样保留。
 
 ## 合规
 
