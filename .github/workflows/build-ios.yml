@@ -28,6 +28,15 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
+      # The icon art is kept as a JPEG so it can be committed from a phone-sized
+      # connection; the asset catalogue needs a 1024×1024 PNG.
+      - name: App icon
+        run: |
+          if [ -f Config/icon/appicon.jpg ]; then
+            sips -s format png Config/icon/appicon.jpg --out Config/iOS/Assets.xcassets/AppIcon.appiconset/AppIcon.png
+            sips -g pixelWidth -g pixelHeight Config/iOS/Assets.xcassets/AppIcon.appiconset/AppIcon.png
+          fi
+
       - name: Cache native builds
         uses: actions/cache@v4
         with:
