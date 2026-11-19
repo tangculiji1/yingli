@@ -29,8 +29,8 @@ jobs:
           python3 --version
           sw_vers
 
-      - name: Install XcodeGen
-        run: brew install xcodegen
+      - name: Install build tools
+        run: brew install xcodegen autoconf automake libtool
 
       # The icon art is kept as a JPEG so it can be committed from a phone-sized
       # connection; the asset catalogue needs a 1024×1024 PNG.
