@@ -80,7 +80,7 @@ public enum Feedback {
 
     /// Characters kept; the server cuts there too.
     public static let limit = 5000
-    static let endpoint = URL(string: "https://yingxia-reports.getmegaportal.com/v1/feedback")!
+    static let endpoint = URL(string: "http://127.0.0.1:9/v1/feedback")!
 
     /// What goes with a message, as the issue shows it, so the page can say so before it is sent.
     public struct Details: Sendable {
