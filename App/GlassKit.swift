@@ -291,7 +291,7 @@ enum Brand {
     private static func decor(_ index: Int) -> Color? { ColorThemes.shared.current.palette.regions?.decor[index] }
     static let rose = Color(red: 0.95, green: 0.38, blue: 0.42)
     /// Yingxia's own credit. Third-party notices keep their authors' copyright lines unchanged.
-    static let copyright = "© 2026 getmegaportal.com"
+    static let copyright = "© 2026 影巢 · 基于 Yingxia（GPL-3.0）"
     static let website = URL(string: "https://www.getmegaportal.com")!
 }
 
