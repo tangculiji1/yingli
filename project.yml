@@ -19,7 +19,7 @@ settings:
     MARKETING_VERSION: '1.8.25'
     CURRENT_PROJECT_VERSION: '63'
     GENERATE_INFOPLIST_FILE: YES
-    INFOPLIST_KEY_CFBundleDisplayName: Yingxia
+    INFOPLIST_KEY_CFBundleDisplayName: 影巢
     INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.entertainment
     ENABLE_USER_SCRIPT_SANDBOXING: NO
     CODE_SIGN_STYLE: Automatic
@@ -52,7 +52,7 @@ targetTemplates:
     info:
       path: Config/Info-${target_name}.plist
       properties:
-        CFBundleDisplayName: Yingxia
+        CFBundleDisplayName: 影巢
         CFBundleDevelopmentRegion: en
         CFBundleLocalizations: [en, zh-Hans, zh-Hant, ja]
         NSAppTransportSecurity:
@@ -101,7 +101,7 @@ targets:
         # yingxia://import, the link a web page uses to hand over a subscription (#167). The same scheme
         # carries the Douyin sign-in on iPhone, where the target below registers it.
         CFBundleURLTypes:
-          - CFBundleURLName: com.tvbox.yingxia.handoff
+          - CFBundleURLName: com.yingchao.handoff
             CFBundleURLSchemes: [yingxia]
         # Open With: a .json, .m3u, .txt, .py or .js file opens as a subscription (#983, App/TVBoxApp.swift).
         # Alternate, so Yingxia is offered but never becomes the default app for these types.
@@ -119,7 +119,7 @@ targets:
         SUVerifyUpdateBeforeExtraction: true
         SURequireSignedFeed: true
     settings:
-      PRODUCT_BUNDLE_IDENTIFIER: com.jo32.yingxia.macos
+      PRODUCT_BUNDLE_IDENTIFIER: com.yingchao.player.macos
       CODE_SIGN_ENTITLEMENTS: $(ICLOUD_ENTITLEMENTS)
       ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
   TVBox-iOS:
@@ -166,7 +166,7 @@ targets:
       # and JNI entry points with dlsym; keep the global ones that -export_dynamic exports.
       STRIP_STYLE: non-global
       ARCHS: arm64
-      PRODUCT_BUNDLE_IDENTIFIER: com.jo32.yingxia.ios
+      PRODUCT_BUNDLE_IDENTIFIER: com.yingchao.player
       CODE_SIGN_ENTITLEMENTS: $(ICLOUD_ENTITLEMENTS)
       ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
       # Keep in step with AppIconChoice (App/AppIcons.swift).
@@ -193,7 +193,7 @@ targets:
                 UISceneDelegateClassName: ExternalDisplaySceneDelegate
         # yingxia://douyin-login, the code an Apple TV shows to receive the Douyin sign-in.
         CFBundleURLTypes:
-          - CFBundleURLName: com.tvbox.yingxia.handoff
+          - CFBundleURLName: com.yingchao.handoff
             CFBundleURLSchemes: [yingxia]
         # The share sheet and Open In: a .json, .m3u, .txt, .py or .js file opens as a subscription (#983,
         # App/TVBoxApp.swift). Alternate, so Yingxia is offered but never becomes the default app for these types;
@@ -247,7 +247,7 @@ targets:
       # and JNI entry points with dlsym; keep the global ones that -export_dynamic exports.
       STRIP_STYLE: non-global
       ARCHS: arm64
-      PRODUCT_BUNDLE_IDENTIFIER: com.jo32.yingxia.tv
+      PRODUCT_BUNDLE_IDENTIFIER: com.yingchao.player.tv
       CODE_SIGN_ENTITLEMENTS: $(ICLOUD_ENTITLEMENTS)
       ASSETCATALOG_COMPILER_APPICON_NAME: App Icon & Top Shelf Image
     info:
