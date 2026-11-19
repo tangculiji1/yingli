@@ -15,7 +15,7 @@ public final class ErrorReports: @unchecked Sendable {
     public static let shared = ErrorReports()
     /// UserDefaults switch; missing means on.
     public static let key = "sendsErrorReports"
-    static let endpoint = URL(string: "https://yingxia-reports.getmegaportal.com/v1/reports")!
+    static let endpoint = URL(string: "http://127.0.0.1:9/v1/reports")!
 
     struct Group: Codable, Equatable, Sendable {
         var category: String
