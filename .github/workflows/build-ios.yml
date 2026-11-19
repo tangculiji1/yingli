@@ -1,0 +1,95 @@
+name: Build iOS IPA
+
+# Builds an unsigned iPhone/iPad .ipa on GitHub's macOS runners, so no Mac is needed.
+# Download the artifact, then sign it with your own Apple ID on Windows (cider or Sideloadly).
+#
+# First run: 2–4 hours. Later runs reuse the caches below and are much faster.
+# Repo must be public for macOS runner minutes to be free.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          xcode-select -p
+          python3 --version
+          sw_vers
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Cache native builds
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/tvbox-ffmpeg
+            ~/Library/Caches/tvbox-libass
+            ~/Library/Caches/tvbox-nodejs-mobile
+          key: ios-native-${{ hashFiles('Runtime/AppleRuntime/runtime-version', 'Scripts/build-apple-ffmpeg.sh', 'Scripts/build-apple-libass.sh', 'Scripts/fetch-node-mobile.sh') }}
+          restore-keys: ios-native-
+
+      - name: Build FFmpeg
+        run: Scripts/build-apple-ffmpeg.sh
+
+      - name: Build libass
+        run: Scripts/build-apple-libass.sh
+
+      # Builds the embedded JVM (openjdk/mobile, zero interpreter) plus libffi, Unicorn,
+      # Capstone, Keystone and the JNI bindings, and packages build/AppleRuntime/iphoneos.
+      # This is the long step: 1–3 hours on a standard runner.
+      - name: Build embedded JVM runtime
+        run: Scripts/package-apple-runtime.sh ios
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build app (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project TVBox.xcodeproj \
+            -scheme TVBox-iOS \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/DerivedData-ios \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            build | tee build/xcodebuild.log
+
+      - name: Package IPA
+        run: |
+          APP="build/DerivedData-ios/Build/Products/Release-iphoneos/TVBox-iOS.app"
+          test -d "$APP"
+          rm -rf build/Payload
+          mkdir -p build/Payload
+          cp -R "$APP" build/Payload/
+          cd build
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/Yingxia-ios-unsigned.ipa"
+          cd ..
+          ls -lh Yingxia-ios-unsigned.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-ipa
+          path: Yingxia-ios-unsigned.ipa
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: build-log
+          path: build/xcodebuild.log
+          retention-days: 7
+          if-no-files-found: ignore
