@@ -25,6 +25,10 @@ jobs:
           python3 --version
           sw_vers
 
+      # The app calls itself Yingxia / 映匣 in its strings; this build shows 影栗.
+      - name: Rename interface strings
+        run: python3 Scripts/rename-ui-strings.py
+
       - name: Install build tools
         run: brew install xcodegen autoconf automake libtool
 
