@@ -31,7 +31,7 @@ jobs:
         run: python3 Scripts/build-overrides.py
 
       - name: Install build tools
-        run: brew install xcodegen autoconf automake libtool
+        run: brew install xcodegen autoconf automake libtool python@3.14
 
       # The icon art is kept as a JPEG so it can be committed from a phone-sized
       # connection; the asset catalogue needs a 1024×1024 PNG.
@@ -70,7 +70,7 @@ jobs:
 
       # Builds the embedded JVM (openjdk/mobile, zero interpreter) plus libffi, Unicorn,
       # Capstone, Keystone and the JNI bindings, and packages build/AppleRuntime/iphoneos.
-      # About 35 minutes; skipped when the packaged runtime comes back from the cache.
+      # About 35 minutes; skiped when the packaged runtime comes back from the cache.
       - name: Build embedded JVM runtime
         run: |
           if [ -f build/AppleRuntime/iphoneos/lib/libTVAppleRuntime.a ]; then
@@ -97,6 +97,41 @@ jobs:
           f=build/apple-runtime/openjdk-mobile/config.log
           [ -f "$f" ] && tail -n 120 "$f" || true
 
+      # Scripts are the only source kind this build cannot run yet: TVBox Python sources need the
+      # CPython that Scripts/build-apple-python.sh assembles (Python sources stay hidden and
+      # unbrowsable without it, see EmbeddedPythonHost.available). pycryptodome and lxml compile
+      # for the device, so this takes a while and the result is cached under its own key.
+      - name: Cache iOS Python runtime
+        id: python-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            build/apple-python
+            build/ApplePython
+          key: ios-python-v1
+
+      - name: Build iOS Python runtime
+        if: steps.python-cache.outputs.cache-hit != 'true'
+        run: |
+          HOST_PYTHON="$(command -v python3.14 || true)"
+          if [ -z "$HOST_PYTHON" ]; then
+            HOST_PYTHON="$(brew --prefix python@3.14)/bin/python3.14"
+          fi
+          export HOST_PYTHON
+          "$HOST_PYTHON" --version
+          Scripts/build-apple-python.sh ios
+          ls -d build/ApplePython/iphoneos/PythonHost build/ApplePython/iphoneos/Frameworks/Python.framework
+
+      - name: Save iOS Python runtime
+        if: success() && steps.python-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            build/apple-python
+            build/ApplePython
+          key: ios-python-v1
+
       # Only the iOS target is built; the macOS-only host folders just have to exist.
       - name: Stub macOS resources
         run: mkdir -p build/ScriptHost build/PythonHost build/JavaHost
@@ -116,12 +151,12 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            CODE_SIGN_ENTITLEMENTS="" \
+            CODE_SIGN_ENTITLEMENT="" \
             build | tee build/xcodebuild.log
 
-      - name: Package IPA
+      - name: Package IPA 
         run: |
-          APP="build/DerivedData-ios/Build/Products/Release-iphoneos/TVBox-iOS.app"
+          APT="build/DerivedData-ios/Build/Products/Release-iphoneos/TVBox-iOS.app"
           test -d "$APP"
           rm -rf build/Payload
           mkdir -p build/Payload
