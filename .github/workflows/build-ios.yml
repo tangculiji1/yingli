@@ -13,7 +13,7 @@ on:
 
 jobs:
   build:
-    runs-on: macos-26-intel
+    runs-on: macos-26
     timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
@@ -58,6 +58,12 @@ jobs:
       # This is the long step: 1–3 hours on a standard runner.
       - name: Build embedded JVM runtime
         run: Scripts/package-apple-runtime.sh ios
+
+      - name: JVM configure log
+        if: failure()
+        run: |
+          f=build/apple-runtime/openjdk-mobile/config.log
+          [ -f "$f" ] && tail -n 120 "$f" || true
 
       - name: Generate Xcode project
         run: xcodegen generate
