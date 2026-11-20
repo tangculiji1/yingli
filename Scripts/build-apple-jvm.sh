@@ -25,8 +25,17 @@ fetch() {
   echo "$digest  $destination" | shasum -a 256 -c -
 }
 if [ ! -x "$BOOT/bin/java" ]; then
-  fetch 'https://github.com/adoptium/temurin26-binaries/releases/download/jdk-26.0.2.1%2B1/OpenJDK26U-jdk_aarch64_mac_hotspot_26.0.2.1_1.tar.gz' \
-    "$WORK/boot-jdk.tar.gz" 8c77a069a150c5b1c80280269ba062463053ebb7619ddef38dcfe3921fc60bdd
+  # The boot JDK runs on the build machine itself, so pick the host's architecture:
+  # GitHub's macOS pool includes both Apple silicon and Intel runners.
+  case "$(uname -m)" in
+    arm64|aarch64)
+      BOOT_JDK_URL='https://github.com/adoptium/temurin26-binaries/releases/download/jdk-26.0.2.1%2B1/OpenJDK26U-jdk_aarch64_mac_hotspot_26.0.2.1_1.tar.gz'
+      BOOT_JDK_SHA=8c77a069a150c5b1c80280269ba062463053ebb7619ddef38dcfe3921fc60bdd ;;
+    *)
+      BOOT_JDK_URL='https://github.com/adoptium/temurin26-binaries/releases/download/jdk-26.0.2.1%2B1/OpenJDK26U-jdk_x64_mac_hotspot_26.0.2.1_1.tar.gz'
+      BOOT_JDK_SHA=e1b58af4ef2089f6de66bdadd5c77a661adfad8340d5b8e19771a76ab5f02188 ;;
+  esac
+  fetch "$BOOT_JDK_URL" "$WORK/boot-jdk.tar.gz" "$BOOT_JDK_SHA"
   mkdir -p "$WORK/boot-jdk"
   tar -xzf "$WORK/boot-jdk.tar.gz" -C "$WORK/boot-jdk"
 fi
