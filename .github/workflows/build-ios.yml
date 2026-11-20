@@ -30,6 +30,13 @@ jobs:
       - name: Apply build overrides
         run: python3 Scripts/build-overrides.py
 
+      # The fork's build points every upstream service at a dead local address. The release feed is
+      # the one worth reaching: it is how Settings learns a newer version exists.
+      - name: Point the update check at the upstream release feed
+        run: |
+          sed -i '' 's|http://127.0.0.1:9/releases.json|https://yingxia.getmegaportal.com/releases.json|' Sources/TVCore/ReleaseFeed.swift
+          grep -n "releases.json" Sources/TVCore/ReleaseFeed.swift
+
       - name: Install build tools
         run: brew install xcodegen autoconf automake libtool python@3.14
 
