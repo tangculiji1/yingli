@@ -25,9 +25,10 @@ jobs:
           python3 --version
           sw_vers
 
-      # The app calls itself Yingxia / 映匣 in its strings; this build shows 影栗.
-      - name: Rename interface strings
-        run: python3 Scripts/rename-ui-strings.py
+      # Build-time tweaks that cannot be pushed from a phone: the app calls itself
+      # Yingxia / 映匣 in its strings, and the file importer dims unknown file types.
+      - name: Apply build overrides
+        run: python3 Scripts/build-overrides.py
 
       - name: Install build tools
         run: brew install xcodegen autoconf automake libtool
