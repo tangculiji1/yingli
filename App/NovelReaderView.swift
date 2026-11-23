@@ -1,5 +1,8 @@
 import SwiftUI
 import TVCore
+#if os(iOS)
+import PhotosUI
+#endif
 
 // The reader follows Readest's page (github.com/readest/readest): pages that fit the screen exactly, justified text
 // with indented paragraphs, the chapter's title small in the top margin and how far the chapter goes at the foot,
@@ -35,8 +38,13 @@ struct NovelPageKey: Equatable {
 @MainActor @Observable final class NovelReaderModel {
     let book: NovelBook
     let chapters: [NovelChapter]
-    /// Chapter texts fetched so far, the ones near the reader kept.
+    /// Chapter texts fetched so far, the ones near the reader kept, in the script the reader picked.
     private(set) var contents: [Int: NovelContent] = [:]
+    /// The same chapters as the source sent them, to convert again when the script changes (#1007).
+    @ObservationIgnored private var fetched: [Int: NovelContent] = [:]
+    /// Chapter titles in the picked script, made on first use; the chapters themselves keep the source's titles,
+    /// which finding a chapter in another source matches on.
+    @ObservationIgnored private var displayTitles: (script: NovelScript, titles: [String])?
     private(set) var failure: String?
     private(set) var nextFailure: String?
     /// A neighbouring chapter being fetched for a page turn.
@@ -71,7 +79,24 @@ struct NovelPageKey: Equatable {
         guard let anchor, let line = lines.first(where: { $0.id == anchor }) else { return loaded.first ?? place?.chapter ?? 0 }
         return line.chapter
     }
-    var currentTitle: String { chapters.indices.contains(currentChapter) ? chapters[currentChapter].title : "" }
+    var currentTitle: String { title(of: currentChapter) }
+    /// A chapter's title as the reader shows it, in the picked script.
+    func title(of index: Int) -> String {
+        guard chapters.indices.contains(index) else { return "" }
+        let script = NovelStore.shared.script
+        guard script != .original else { return chapters[index].title }
+        if displayTitles?.script != script { displayTitles = (script, script.convert(chapters.map(\.title))) }
+        return displayTitles?.titles[index] ?? chapters[index].title
+    }
+    /// The chapters with their titles in the picked script, for the table of contents.
+    var displayChapters: [NovelChapter] {
+        guard NovelStore.shared.script != .original else { return chapters }
+        return chapters.map { chapter in
+            var shown = chapter
+            shown.title = title(of: chapter.index)
+            return shown
+        }
+    }
     var readable: [NovelChapter] { chapters.filter { !$0.isVolume } }
     func previous(_ index: Int) -> Int? { chapters[..<min(index, chapters.count)].last { !$0.isVolume }?.index }
     func next(_ index: Int) -> Int? { index + 1 < chapters.count ? chapters[(index + 1)...].first { !$0.isVolume }?.index : nil }
@@ -84,7 +109,9 @@ struct NovelPageKey: Equatable {
 
     func load(_ index: Int) async throws -> NovelContent {
         if let content = contents[index] { return content }
-        let content = try await NovelBooks.shared.content(book, chapters: chapters, index: index)
+        let source = try await NovelBooks.shared.content(book, chapters: chapters, index: index)
+        fetched[index] = source
+        let content = NovelStore.shared.script.convert(source)
         contents[index] = content
         // Keep the chapters around the reader and around the one just loaded; drop the far ones. (Measuring from the
         // reader alone dropped a chapter opened far away, e.g. from the slider, the moment it arrived: the reader then
@@ -92,9 +119,26 @@ struct NovelPageKey: Equatable {
         let anchors = [currentChapter, index]
         func distance(_ chapter: Int) -> Int { anchors.map { abs($0 - chapter) }.min() ?? 0 }
         while contents.count > 8, let far = contents.keys.filter({ distance($0) > 1 }).max(by: { distance($0) < distance($1) }) {
-            contents[far] = nil; paged[far] = nil
+            contents[far] = nil; paged[far] = nil; fetched[far] = nil
         }
         return content
+    }
+
+    /// Shows the chapters already fetched in the newly picked script (#1007): pages are set again and the scroll
+    /// layout's lines made again, keeping the line at the top. Called as the choice changes, before the next frame.
+    func reconvert() {
+        let script = NovelStore.shared.script
+        for (index, source) in fetched { contents[index] = script.convert(source) }
+        paged = [:]; pagedKey = nil
+        guard !loaded.isEmpty else { return }
+        var rebuilt: [NovelLine] = []
+        for chapter in loaded {
+            guard let content = contents[chapter] else { continue }
+            let made = Self.lines(content, chapter: chapter)
+            rebuilt += made; counts[chapter] = made.count
+        }
+        lines = rebuilt
+        if let anchor, !rebuilt.contains(where: { $0.id == anchor }) { self.anchor = rebuilt.first?.id }
     }
 
     /// Fetches the chapter the reader stands on when its text is gone, so a page never waits on nothing.
@@ -244,6 +288,44 @@ struct NovelPageKey: Equatable {
         }
     }
 
+    // MARK: Bookmarks (#1452)
+
+    /// Where reading is: the chapter, how far into it (0–1) and the words there. Nil before a chapter is shown.
+    var here: (chapter: Int, position: Double, excerpt: String)? {
+        if pagesLayout {
+            guard let place, chapters.indices.contains(place.chapter), let content = contents[place.chapter] else { return nil }
+            let body = NovelTypeStyle.paragraphs(content).joined(separator: "\n") as NSString
+            let start = min(body.length, max(0, place.location - (NovelTypeStyle.length(content) - body.length)))
+            let words = body.substring(with: NSRange(location: start, length: min(120, body.length - start)))
+            return (place.chapter, Double(place.location) / Double(max(1, NovelTypeStyle.length(content))), Self.excerpt(words))
+        }
+        guard let anchor, let at = lines.firstIndex(where: { $0.id == anchor }), chapters.indices.contains(lines[at].chapter) else { return nil }
+        let line = lines[at]
+        // A heading says nothing of the place: the first words under it.
+        let words = line.heading ? lines[(at + 1)...].first { !$0.heading && $0.chapter == line.chapter }?.text ?? line.text : line.text
+        return (line.chapter, Double(line.offset) / Double(max(1, counts[line.chapter] ?? 1)), Self.excerpt(words))
+    }
+
+    static func excerpt(_ text: String) -> String {
+        String(text.split(whereSeparator: \.isWhitespace).joined(separator: " ").prefix(60))
+    }
+
+    /// A bookmark on the screen being read, if any: inside the page shown, or on the top line or two of the column.
+    func bookmark(among bookmarks: [NovelBookmark], key: NovelPageKey?) -> NovelBookmark? {
+        guard let here else { return nil }
+        let candidates = bookmarks.filter { $0.chapterIndex == here.chapter }
+        guard !candidates.isEmpty else { return nil }
+        if pagesLayout {
+            guard let place, let key, let pages = pages(place.chapter, key), let content = contents[place.chapter] else { return nil }
+            let spread = pages.spread(containing: place.location), length = Double(max(1, NovelTypeStyle.length(content)))
+            let start = pages.location(ofSpread: spread), end = spread + 1 < pages.spreadCount ? pages.location(ofSpread: spread + 1) : Int.max
+            return candidates.first { (start..<end).contains(Int(($0.position * length).rounded())) }
+        }
+        let count = Double(max(1, counts[here.chapter] ?? 1))
+        let top = Int((here.position * count).rounded())
+        return candidates.first { abs(Int(($0.position * count).rounded()) - top) <= 1 }
+    }
+
     /// The line one screen further on (`forward`) or back from the top line, from the heights measured so far.
     func turn(forward: Bool, viewport: CGFloat, lineHeight: CGFloat) -> String? {
         guard let anchor, let at = lines.firstIndex(where: { $0.id == anchor }) else { return lines.first?.id }
@@ -305,8 +387,11 @@ private struct NovelPageFrame {
     var gap: CGFloat
     var height: CGFloat
     var band: CGFloat
+    /// Where the running head and the page count sit: in the bands at the screen's edges, whatever the margins.
+    var headY: CGFloat
+    var footY: CGFloat
 
-    init(size: CGSize, insets: EdgeInsets, margin: CGFloat) {
+    init(size: CGSize, insets: EdgeInsets, margin: CGFloat, vertical: CGFloat = 0) {
         self.size = size
         #if os(tvOS)
         band = 90
@@ -315,8 +400,10 @@ private struct NovelPageFrame {
         #else
         band = 34
         #endif
-        top = insets.top + band
-        bottom = insets.bottom + band
+        top = insets.top + band + vertical
+        bottom = insets.bottom + band + vertical
+        headY = insets.top + band / 2
+        footY = size.height - insets.bottom - band / 2
         side = margin + max(insets.leading, insets.trailing)
         let width = max(100, size.width - side * 2)
         // Two columns where a line would otherwise run too long to read comfortably.
@@ -336,6 +423,12 @@ struct NovelReaderView: View {
     @State private var chrome = true
     @State private var panel: Panel?
     @State private var showContents = false
+    @State private var showsSources = false
+    /// The contents sheet's tab: it opens on the one used last.
+    @State private var contentsShowsBookmarks = false
+    /// While another source's copy loads (#1450), and why it couldn't.
+    @State private var switching = false
+    @State private var switchFailure: String?
     @State private var viewport: CGFloat = 600
     // Page turning.
     @State private var drag: CGFloat = 0
@@ -344,6 +437,15 @@ struct NovelReaderView: View {
     @State private var pageWidth: CGFloat = 400
     /// The chapter slider's value while it is dragged.
     @State private var scrub: Double?
+    #if os(iOS)
+    /// Taps and keys turning the curled page.
+    @State private var curlRequest = NovelCurlRequest()
+    /// The picture being picked for the background (#1265).
+    @State private var pickedPhoto: PhotosPickerItem?
+    #elseif os(macOS)
+    @State private var picksBackground = false
+    #endif
+    @State private var backgroundFailed = false
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var scheme
     #if os(macOS)
@@ -367,7 +469,8 @@ struct NovelReaderView: View {
     private var dark: Bool { store.appearance.isDark(scheme == .dark) }
     private var colors: (background: Color, text: Color) { store.theme.colors(dark: dark) }
     private var style: NovelTypeStyle {
-        NovelTypeStyle(fontSize: store.fontSize, lineHeight: store.lineHeight, font: store.font, text: colors.text, fontsReady: fonts.generation)
+        NovelTypeStyle(fontSize: store.fontSize, lineHeight: store.lineHeight, font: store.font, text: colors.text, fontsReady: fonts.generation,
+                       paragraphSpacing: store.paragraphSpacing, script: store.script)
     }
     private var lineHeight: CGFloat { store.fontSize * store.lineHeight }
     #if os(tvOS)
@@ -378,7 +481,7 @@ struct NovelReaderView: View {
 
     var body: some View {
         ZStack {
-            colors.background.ignoresSafeArea()
+            pageBackground.ignoresSafeArea()
             if model.place != nil || !model.lines.isEmpty {
                 if store.pageTurn == .pages { pager } else { column }
             } else if let failure = model.failure {
@@ -419,13 +522,25 @@ struct NovelReaderView: View {
         }
         #endif
         .sheet(isPresented: $showContents) {
-            NovelReaderContents(model: model, colors: colors, dark: dark) { index in
+            NovelReaderContents(model: model, colors: colors, dark: dark, showsBookmarks: $contentsShowsBookmarks) { index, position in
                 showContents = false
-                Task { await model.open(index) }
+                Task { await model.open(index, position: position) }
             }
+        }
+        .sheet(isPresented: $showsSources) {
+            NavigationStack {
+                NovelSourcePicker(book: model.book, alternatives: []) { other in switchSource(to: other) }
+                    #if !os(tvOS)
+                    .toolbar { ToolbarItem(placement: .cancellationAction) { Button(L10n.text("Cancel")) { showsSources = false } } }
+                    #endif
+            }
+            #if os(macOS)
+            .frame(minWidth: 460, minHeight: 520)
+            #endif
         }
         .onChange(of: store.pageTurn) { _, turn in model.switchLayout(to: turn) }
         .onChange(of: store.font) { _, font in fonts.prepare(font) }
+        .task { await store.loadBackground() }
         .task {
             fonts.prepare(store.font)
             await model.open(start.chapter, position: start.position)
@@ -451,7 +566,23 @@ struct NovelReaderView: View {
                 await scrubbed(to: jump)
                 try? await Task.sleep(for: .seconds(4))
             }
+            // `-qaNovelMark 1` bookmarks the page; `-qaNovelSwitch <name>` reads on from the source whose name has it.
+            if UserDefaults.standard.bool(forKey: "qaNovelMark") { toggleBookmark(nil) }
+            if let name = UserDefaults.standard.string(forKey: "qaNovelSwitch"),
+               let source = store.searchable.first(where: { $0.name.contains(name) }) {
+                var other: NovelBook?
+                for await answer in NovelBooks.search(model.book.name, in: [source]) {
+                    other = (try? answer.result.get())?.first { $0.match == model.book.match || NovelBookNameMatch.same($0.name, model.book.name) }
+                }
+                if let other {
+                    switchSource(to: other)
+                    while switching { try? await Task.sleep(for: .milliseconds(200)) }
+                    try? await Task.sleep(for: .seconds(1))
+                }
+            }
             switch UserDefaults.standard.string(forKey: "qaNovelPanel") {
+            case "bookmarks": contentsShowsBookmarks = true; showContents = true
+            case "sources": showsSources = true
             case "text": panel = .text
             case "theme": panel = .theme
             case "contents": showContents = true
@@ -476,25 +607,27 @@ struct NovelReaderView: View {
 
     private func pagerBody(insets: EdgeInsets) -> some View {
         GeometryReader { geometry in
-            let frame = NovelPageFrame(size: geometry.size, insets: insets, margin: store.margin)
+            let frame = NovelPageFrame(size: geometry.size, insets: insets, margin: store.margin, vertical: store.verticalMargin)
             let key = NovelPageKey(style: style, width: frame.columnWidth, height: frame.height, columns: frame.columns)
             ZStack(alignment: .topLeading) {
                 if let place = model.place {
-                    // Identified by place, so when a turn ends the page already drawn underneath simply becomes the
-                    // current one: nothing is drawn again, nothing flickers.
-                    ForEach(layers(place, key: key, width: geometry.size.width), id: \.place) { layer in
-                        page(layer.place, frame: frame, key: key)
-                            .overlay(alignment: .trailing) { edgeShade(layer.shade) }
-                            .offset(x: layer.offset)
-                            .zIndex(layer.z)
+                    #if os(iOS)
+                    if store.curl {
+                        curlPager(place, frame: frame, key: key)
+                    } else {
+                        slidingPages(place, frame: frame, key: key, width: geometry.size.width)
                     }
+                    #else
+                    slidingPages(place, frame: frame, key: key, width: geometry.size.width)
+                    #endif
                 }
             }
             .frame(width: geometry.size.width, height: geometry.size.height, alignment: .topLeading)
             .clipped()
             .contentShape(Rectangle())
             #if os(iOS)
-            .gesture(swipe(width: geometry.size.width))
+            // With the curl, UIKit's page curl takes the finger.
+            .gesture(swipe(width: geometry.size.width), including: store.curl ? .subviews : .all)
             #endif
             #if !os(tvOS)
             .onTapGesture { location in tap(location, size: geometry.size) }
@@ -519,6 +652,29 @@ struct NovelReaderView: View {
         .onChange(of: chrome) { _, shown in if !shown { textFocused = true } }
         #endif
     }
+
+    /// Identified by place, so when a turn ends the page already drawn underneath simply becomes the current one:
+    /// nothing is drawn again, nothing flickers.
+    @ViewBuilder private func slidingPages(_ place: NovelPlace, frame: NovelPageFrame, key: NovelPageKey, width: CGFloat) -> some View {
+        ForEach(layers(place, key: key, width: width), id: \.place) { layer in
+            page(layer.place, frame: frame, key: key)
+                .overlay(alignment: .trailing) { edgeShade(layer.shade) }
+                .offset(x: layer.offset)
+                .zIndex(layer.z)
+        }
+    }
+
+    #if os(iOS)
+    private func curlPager(_ place: NovelPlace, frame: NovelPageFrame, key: NovelPageKey) -> some View {
+        // Hosted pages don't inherit the reader's environment: they get its text colour and appearance here.
+        let colors = colors, dark = dark
+        return NovelCurlPager(place: place, key: key, request: curlRequest,
+                              step: { model.step(from: $0, forward: $1, key: key) },
+                              page: { AnyView(page($0, frame: frame, key: key).foregroundStyle(colors.text).environment(\.colorScheme, dark ? .dark : .light)) },
+                              moved: { model.move(to: $0) },
+                              blocked: { place, forward in Task { _ = await model.fetchNeighbour(of: place, forward: forward) } })
+    }
+    #endif
 
     private struct PageLayer {
         let place: NovelPlace
@@ -555,7 +711,7 @@ struct NovelReaderView: View {
     /// One screen: the columns, the chapter's title above them and how far the chapter goes below.
     @ViewBuilder private func page(_ place: NovelPlace, frame: NovelPageFrame, key: NovelPageKey) -> some View {
         ZStack(alignment: .topLeading) {
-            colors.background
+            pageBackground
             if let pages = model.pages(place.chapter, key) {
                 let spread = pages.spread(containing: place.location)
                 ForEach(0..<frame.columns, id: \.self) { column in
@@ -568,12 +724,12 @@ struct NovelReaderView: View {
                 }
                 // The running head stays off a chapter's first page, where its title is printed large.
                 if spread > 0 {
-                    Text(model.chapters.indices.contains(place.chapter) ? model.chapters[place.chapter].title : "")
+                    Text(model.title(of: place.chapter))
                         .font(.system(size: chromeFont, weight: .light))
                         .lineLimit(1)
                         .opacity(chrome ? 0 : 0.6)
                         .frame(width: frame.size.width - frame.side * 2)
-                        .position(x: frame.size.width / 2, y: frame.top - frame.band / 2)
+                        .position(x: frame.size.width / 2, y: frame.headY)
                 }
                 HStack(spacing: 12) {
                     Text(remaining(pages.spreadCount - spread - 1))
@@ -585,7 +741,7 @@ struct NovelReaderView: View {
                 .lineLimit(1)
                 .opacity(chrome ? 0 : 0.6)
                 .frame(width: frame.size.width - frame.side * 2)
-                .position(x: frame.size.width / 2, y: frame.size.height - frame.bottom + frame.band / 2)
+                .position(x: frame.size.width / 2, y: frame.footY)
             } else if let failure = model.missing[place.chapter] {
                 VStack(spacing: 14) {
                     Text(failure).font(.footnote).multilineTextAlignment(.center).opacity(0.7)
@@ -601,6 +757,17 @@ struct NovelReaderView: View {
             }
         }
         .frame(width: frame.size.width, height: frame.size.height, alignment: .topLeading)
+    }
+
+    /// The page colour, with the picked picture showing through it (#1265). The picture fills the page without
+    /// sizing it, and is decoded once, so turning draws nothing new.
+    private var pageBackground: some View {
+        colors.background.overlay {
+            if let image = store.backgroundImage {
+                Image(decorative: image, scale: 1).resizable().scaledToFill().opacity(store.backgroundOpacity)
+            }
+        }
+        .clipped()
     }
 
     private func remaining(_ pages: Int) -> String {
@@ -655,6 +822,9 @@ struct NovelReaderView: View {
             Task { if await model.fetchNeighbour(of: place, forward: forward), model.place == place { turn(forward: forward) } }
             return
         }
+        #if os(iOS)
+        if store.curl { curlRequest = NovelCurlRequest(id: curlRequest.id + 1, forward: forward); return }
+        #endif
         turning = true
         withAnimation(.smooth(duration: 0.3)) {
             drag = forward ? -pageWidth : pageWidth
@@ -678,6 +848,45 @@ struct NovelReaderView: View {
     private func close() {
         model.save(force: true)
         dismiss()
+    }
+
+    /// Marks the place being read, or unmarks the bookmark already on this page.
+    private func toggleBookmark(_ marked: NovelBookmark?) {
+        if let marked { store.removeBookmark(marked.id, from: model.book); return }
+        guard let here = model.here, model.chapters.indices.contains(here.chapter) else { return }
+        // Reading puts the book on the shelf, where its bookmarks are kept.
+        model.save(force: true)
+        store.addBookmark(NovelBookmark(chapterIndex: here.chapter, chapterTitle: model.chapters[here.chapter].title,
+                                        position: here.position, excerpt: here.excerpt), to: model.book)
+    }
+
+    /// Reads on from another source's copy of the book (#1450), at the same chapter (by title, else by number) and as far
+    /// into it. The shelf follows, bookmarks included; if the copy can't be read, the reader stays where it was.
+    private func switchSource(to other: NovelBook) {
+        guard other.id != model.book.id, !switching else { return }
+        let old = model.book, current = model.currentChapter, position = model.here?.position ?? 0
+        let title = model.chapters.indices.contains(current) ? model.chapters[current].title : ""
+        model.save(force: true)
+        switching = true; switchFailure = nil
+        Task {
+            defer { switching = false }
+            do {
+                let filled = try await NovelBooks.shared.details(other)
+                let list = try await NovelBooks.shared.chapters(filled, refresh: true)
+                guard let target = NovelChapterMatch.index(title: title, index: current, in: list) else {
+                    throw TVError.unsupported(L10n.text("The source listed no chapters for this book."))
+                }
+                let next = NovelReaderModel(NovelReading(book: filled, chapters: list, chapter: target, position: position))
+                await next.open(target, position: position)
+                if let failure = next.failure { throw TVError.unsupported(failure) }
+                store.switchSource(of: old, to: filled, chapters: list)
+                model = next
+                next.save(force: true)
+            } catch is CancellationError {
+            } catch {
+                switchFailure = L10n.text("Couldn’t read this book from %@: %@", store.name(of: other.sourceKey), error.novelMessage)
+            }
+        }
     }
 
     // MARK: Scroll layout
@@ -734,6 +943,8 @@ struct NovelReaderView: View {
             .onChange(of: chrome) { _, shown in if !shown { textFocused = true } }
             #endif
         }
+        // Above and below the column, the text stops short of the screen's edges.
+        .padding(.vertical, store.verticalMargin)
     }
 
     @ViewBuilder private func lineView(_ line: NovelLine) -> some View {
@@ -749,7 +960,7 @@ struct NovelReaderView: View {
             Text((line.continued ? "" : "\u{3000}\u{3000}") + line.text)
                 .font(store.font.font(size: store.fontSize))
                 .lineSpacing(max(0, store.fontSize * (store.lineHeight - 1.3)))
-                .padding(.top, line.continued ? max(0, store.fontSize * (store.lineHeight - 1.3)) : store.fontSize * 0.55)
+                .padding(.top, line.continued ? max(0, store.fontSize * (store.lineHeight - 1.3)) : store.fontSize * (store.paragraphSpacing + 0.15))
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
                 .id(line.id)
@@ -787,6 +998,19 @@ struct NovelReaderView: View {
                 }
                 .lineLimit(1)
                 .frame(maxWidth: .infinity)
+                let marked = model.bookmark(among: store.bookmarks(model.book), key: pageKey)
+                Button { toggleBookmark(marked) } label: { Image(systemName: marked == nil ? "bookmark" : "bookmark.fill") }
+                    .buttonStyle(NovelRoundButtonStyle(size: 40))
+                    .disabled(model.here == nil)
+                    .accessibilityLabel(marked == nil ? L10n.text("Add Bookmark") : L10n.text("Remove Bookmark"))
+                    .accessibilityIdentifier("novel.reader.bookmark")
+                Button { showsSources = true } label: {
+                    if switching { ProgressView().appControlSize(.small) } else { Image(systemName: "arrow.left.arrow.right") }
+                }
+                .buttonStyle(NovelRoundButtonStyle(size: 40))
+                .disabled(switching)
+                .accessibilityLabel(L10n.text("Change Source"))
+                .accessibilityIdentifier("novel.reader.source")
                 Button { showContents = true } label: { Image(systemName: "list.bullet") }
                     .buttonStyle(NovelRoundButtonStyle(size: 40))
                     .accessibilityLabel(L10n.text("Contents"))
@@ -804,6 +1028,11 @@ struct NovelReaderView: View {
                     .ignoresSafeArea(edges: .top)
             }
             Spacer(minLength: 0)
+            if let failure = switchFailure {
+                Text(failure).font(.footnote).padding(.horizontal, 16).padding(.vertical, 10)
+                    .glassSurface(.regular, in: Capsule()).padding(.bottom, 10)
+                    .onTapGesture { switchFailure = nil }
+            }
             if let failure = model.nextFailure, store.pageTurn == .pages {
                 Text(failure).font(.footnote).padding(.horizontal, 16).padding(.vertical, 10)
                     .glassSurface(.regular, in: Capsule()).padding(.bottom, 10)
@@ -907,7 +1136,7 @@ struct NovelReaderView: View {
     private var chapterLabel: some View {
         Group {
             if let scrub, model.readable.indices.contains(Int(scrub)) {
-                Text(model.readable[Int(scrub)].title)
+                Text(model.title(of: model.readable[Int(scrub)].index))
             } else {
                 Text(model.progressText)
             }
@@ -962,13 +1191,27 @@ struct NovelReaderView: View {
                 Color.clear.frame(width: largeAWidth, height: 1)
                 #endif
             }
-            HStack(spacing: 12) {
-                Text(L10n.text("Margins")).font(.caption).opacity(0.75).lineLimit(1).frame(width: labelWidth, alignment: .leading)
-                NovelAdjuster(value: $store.margin, range: NovelStore.marginRange, step: 2, label: L10n.text("Margins")) { "\(Int($0))" }
-                #if os(tvOS)
-                Color.clear.frame(width: largeAWidth, height: 1)
-                #endif
+            // #1430: paragraphs, and margins at the sides and above and below the text.
+            adjusterRow(L10n.text("Paragraph Spacing"), value: $store.paragraphSpacing, range: NovelStore.paragraphSpacingRange, step: 0.1) {
+                String(format: "%.1f", $0)
             }
+            adjusterRow(L10n.text("Side Margins"), value: $store.margin, range: NovelStore.marginRange, step: 2) { "\(Int($0))" }
+            adjusterRow(L10n.text("Top & Bottom"), value: $store.verticalMargin, range: NovelStore.verticalMarginRange, step: marginStep) { "\(Int($0))" }
+            // #1007: chapters in Traditional or Simplified characters, converted as they arrive.
+            pickerRow(L10n.text("Chinese Script"), selection: Binding(get: { store.script }, set: { store.script = $0; model.reconvert() })) {
+                Text(L10n.text("Original Text")).tag(NovelScript.original)
+                Text(L10n.text("Traditional")).tag(NovelScript.traditional)
+                Text(L10n.text("Simplified")).tag(NovelScript.simplified)
+            }
+            #if os(iOS)
+            // #1437, #1452: pages curl over as in Books, or slide.
+            if store.pageTurn == .pages {
+                pickerRow(L10n.text("Page Turn"), selection: $store.curl) {
+                    Text(L10n.text("Slide")).tag(false)
+                    Text(L10n.text("Curl")).tag(true)
+                }
+            }
+            #endif
             HStack(spacing: 8) {
                 ForEach(NovelFontChoice.allCases) { choice in
                     Button { store.font = choice } label: {
@@ -1004,6 +1247,90 @@ struct NovelReaderView: View {
         }
     }
 
+    private func settingLabel(_ title: String) -> some View {
+        Text(title).font(.caption).opacity(0.75).lineLimit(1).frame(width: labelWidth, alignment: .leading)
+    }
+
+    private func adjusterRow(_ title: String, value: Binding<Double>, range: ClosedRange<Double>, step: Double,
+                             format: @escaping (Double) -> String) -> some View {
+        HStack(spacing: 12) {
+            settingLabel(title)
+            NovelAdjuster(value: value, range: range, step: step, label: title, format: format)
+            #if os(tvOS)
+            Color.clear.frame(width: largeAWidth, height: 1)
+            #endif
+        }
+    }
+
+    private func pickerRow<Value: Hashable, Options: View>(_ title: String, selection: Binding<Value>,
+                                                          @ViewBuilder options: () -> Options) -> some View {
+        HStack(spacing: 12) {
+            settingLabel(title)
+            Picker(title, selection: selection, content: options).pickerStyle(.segmented).labelsHidden()
+            #if os(tvOS)
+            Color.clear.frame(width: largeAWidth, height: 1)
+            #endif
+        }
+    }
+
+    #if !os(tvOS)
+    /// A picture behind the page (#1265): picked from Photos on iPhone and iPad, from a file on the Mac.
+    private var backgroundSettings: some View {
+        VStack(spacing: 12) {
+            HStack(spacing: 12) {
+                settingLabel(L10n.text("Background Image"))
+                Spacer(minLength: 0)
+                let choose = store.backgroundImage == nil ? L10n.text("Choose Image…") : L10n.text("Change Image…")
+                #if os(iOS)
+                PhotosPicker(selection: $pickedPhoto, matching: .images) { Text(choose).lineLimit(1) }
+                    .fixedSize()
+                #else
+                Button { picksBackground = true } label: { Text(choose).lineLimit(1) }
+                    .fixedSize()
+                #endif
+                if store.backgroundImage != nil {
+                    Button(role: .destructive) { store.removeBackground() } label: { Image(systemName: "trash") }
+                        .accessibilityLabel(L10n.text("Remove"))
+                }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            if store.backgroundImage != nil {
+                adjusterRow(L10n.text("Image Opacity"), value: $store.backgroundOpacity, range: NovelStore.backgroundOpacityRange, step: 0.05) {
+                    "\(Int(($0 * 100).rounded()))%"
+                }
+            }
+            if backgroundFailed {
+                Text(L10n.text("This picture can't be used.")).font(.caption).opacity(0.75)
+            }
+        }
+        #if os(iOS)
+        .onChange(of: pickedPhoto) { _, item in
+            guard let item else { return }
+            Task {
+                let data = try? await item.loadTransferable(type: Data.self)
+                var used = false
+                if let data { used = await store.setBackground(data) }
+                backgroundFailed = !used
+                pickedPhoto = nil
+            }
+        }
+        #else
+        .fileImporter(isPresented: $picksBackground, allowedContentTypes: [.image]) { result in
+            guard case .success(let url) = result else { return }
+            Task {
+                let scoped = url.startAccessingSecurityScopedResource()
+                let data = try? Data(contentsOf: url)
+                if scoped { url.stopAccessingSecurityScopedResource() }
+                var used = false
+                if let data { used = await store.setBackground(data) }
+                backgroundFailed = !used
+            }
+        }
+        #endif
+    }
+    #endif
+
     private var themeSettings: some View {
         VStack(spacing: 14) {
             Picker(L10n.text("Appearance"), selection: $store.appearance) {
@@ -1037,6 +1364,9 @@ struct NovelReaderView: View {
                     .accessibilityAddTraits(selected ? .isSelected : [])
                 }
             }
+            #if !os(tvOS)
+            backgroundSettings
+            #endif
         }
     }
 
@@ -1047,9 +1377,11 @@ struct NovelReaderView: View {
     private let aWidth: CGFloat? = 240
     private let largeAWidth: CGFloat? = 60
     private let smallA: CGFloat = 22
+    private let marginStep = 4.0
     #else
+    private let marginStep = 2.0
     private let themeColumns = 4
-    private let labelWidth: CGFloat = 84
+    private let labelWidth: CGFloat = 112
     private let aWidth: CGFloat? = nil
     private let largeAWidth: CGFloat? = nil
     private let smallA: CGFloat = 13
@@ -1113,25 +1445,45 @@ private struct NovelRoundButtonStyle: ButtonStyle {
     }
 }
 
-/// The table of contents inside the reader, the current chapter in view.
+/// The table of contents inside the reader, the current chapter in view, and the book's bookmarks beside it.
 private struct NovelReaderContents: View {
     let model: NovelReaderModel
     let colors: (background: Color, text: Color)
     let dark: Bool
-    let open: (Int) -> Void
+    @Binding var showsBookmarks: Bool
+    /// A chapter, and how far into it.
+    let open: (Int, Double) -> Void
+    @State private var store = NovelStore.shared
     @Environment(\.dismiss) private var dismiss
+
+    private var bookmarks: [NovelBookmark] { store.bookmarks(model.book) }
+
     var body: some View {
         NavigationStack {
-            NovelChapterList(book: model.book, chapters: model.chapters, current: model.currentChapter,
-                             colors: NovelListColors(background: colors.background, text: colors.text, accent: colors.text)) { open($0) }
-                .background(colors.background.ignoresSafeArea())
-                .navigationTitle(L10n.text("Contents"))
-                #if os(iOS)
-                .navigationBarTitleDisplayMode(.inline)
-                #endif
-                #if !os(tvOS)
-                .toolbar { ToolbarItem(placement: .cancellationAction) { Button(L10n.text("Done")) { dismiss() } } }
-                #endif
+            VStack(spacing: 0) {
+                Picker(L10n.text("Show"), selection: $showsBookmarks) {
+                    Text(L10n.text("Contents")).tag(false)
+                    Text(L10n.text("Bookmarks")).tag(true)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .padding(.horizontal, 16).padding(.vertical, 8)
+                .accessibilityIdentifier("novel.reader.contentsKind")
+                if showsBookmarks {
+                    bookmarkList
+                } else {
+                    NovelChapterList(book: model.book, chapters: model.displayChapters, current: model.currentChapter,
+                                     colors: NovelListColors(background: colors.background, text: colors.text, accent: colors.text)) { open($0, 0) }
+                }
+            }
+            .background(colors.background.ignoresSafeArea())
+            .navigationTitle(showsBookmarks ? L10n.text("Bookmarks") : L10n.text("Contents"))
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            #if !os(tvOS)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button(L10n.text("Done")) { dismiss() } } }
+            #endif
         }
         .environment(\.colorScheme, dark ? .dark : .light)
         #if !os(tvOS)
@@ -1140,5 +1492,52 @@ private struct NovelReaderContents: View {
         #if os(macOS)
         .frame(minWidth: 460, minHeight: 560)
         #endif
+    }
+}
+
+extension NovelReaderContents {
+    @ViewBuilder fileprivate var bookmarkList: some View {
+        if bookmarks.isEmpty {
+            ContentUnavailableView(L10n.text("No Bookmarks"), systemImage: "bookmark",
+                                   description: Text(L10n.text("Use the bookmark button at the top of the page to mark your place.")))
+                .foregroundStyle(colors.text)
+                .frame(maxHeight: .infinity)
+        } else {
+            List {
+                ForEach(bookmarks) { bookmark in
+                    Button { open(bookmark.chapterIndex, bookmark.position) } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(spacing: 8) {
+                                Text(bookmark.chapterTitle).font(.body.weight(.semibold)).lineLimit(1)
+                                Spacer(minLength: 8)
+                                Text(bookmark.created, format: .dateTime.month().day()).font(.caption).opacity(0.6)
+                            }
+                            if !bookmark.excerpt.isEmpty { Text(bookmark.excerpt).font(.callout).opacity(0.7).lineLimit(2) }
+                        }
+                        .foregroundStyle(colors.text)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .accessibilityIdentifier("novel.reader.bookmark." + bookmark.id.uuidString)
+                    .contextMenu {
+                        Button(role: .destructive) { store.removeBookmark(bookmark.id, from: model.book) } label: {
+                            Label(L10n.text("Remove Bookmark"), systemImage: "trash")
+                        }
+                    }
+                    #if !os(tvOS)
+                    .listRowBackground(colors.background)
+                    #endif
+                }
+                #if !os(tvOS)
+                .onDelete { offsets in
+                    let marked = bookmarks
+                    for offset in offsets { store.removeBookmark(marked[offset].id, from: model.book) }
+                }
+                #endif
+            }
+            #if !os(tvOS)
+            .scrollContentBackground(.hidden)
+            #endif
+        }
     }
 }

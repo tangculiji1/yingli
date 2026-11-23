@@ -16,8 +16,8 @@ settings:
     # a view there is safe, so keep the compile-time checks and drop the runtime trap.
     # https://developer.apple.com/forums/thread/802729
     OTHER_SWIFT_FLAGS: $(inherited) -Xfrontend -disable-dynamic-actor-isolation
-    MARKETING_VERSION: '1.8.26'
-    CURRENT_PROJECT_VERSION: '64'
+    MARKETING_VERSION: '1.8.28'
+    CURRENT_PROJECT_VERSION: '66'
     GENERATE_INFOPLIST_FILE: YES
     INFOPLIST_KEY_CFBundleDisplayName: 影栗
     INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.entertainment
@@ -26,6 +26,13 @@ settings:
     DEVELOPMENT_TEAM: ''
     # Config/iCloud.entitlements once the App IDs and profiles have iCloud (Sources/TVCore/CloudSync.swift).
     ICLOUD_ENTITLEMENTS: ''
+    # YES once the App IDs and profiles have Sign in with Apple, with an entitlements file that has it
+    # (Config/AppleSignIn.entitlements or Config/iCloud-AppleSignIn.entitlements as ICLOUD_ENTITLEMENTS). Info.plist's
+    # YingxiaAppleSignIn tells the app (App/AccountStore.swift); Telegram sign-in works without it.
+    APPLE_SIGN_IN: 'NO'
+    # Debug builds only: another accounts server baked in, e.g. Services/accounts/test/serve.mjs on the Mac's LAN address
+    # for a phone (ACCOUNTS_SERVER=http://192.168.1.2:8790). Release builds ignore it.
+    ACCOUNTS_SERVER: ''
 packages:
   # Symlinks to the root Package.swift, Sources, Vendor and Tests. Xcode walks every file under a
   # local package before building, so pointing it at the repo root made it scan build/ (minutes).
@@ -62,6 +69,9 @@ targetTemplates:
         NSBonjourServices: [_yingxia._tcp]
         UILaunchScreen: {}
         UIBackgroundModes: [audio]
+        # Whether this build signs in with Apple (App/AccountStore.swift): the APPLE_SIGN_IN setting.
+        YingxiaAppleSignIn: $(APPLE_SIGN_IN)
+        YingxiaAccountsServer: $(ACCOUNTS_SERVER)
 targets:
   TVBox-macOS:
     templates: [SharedApp]
@@ -179,8 +189,8 @@ targets:
         CADisableMinimumFrameDurationOnPhone: true
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
         UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
-        # Save Code to Photos, where a sign-in code can be scanned by the app on the same phone.
-        NSPhotoLibraryAddUsageDescription: Saves a sign-in code to Photos, so the app on this phone can scan it.
+        # Save Frame in the player (#1342), and Save Code to Photos, where a sign-in code can be scanned by the app on the same phone.
+        NSPhotoLibraryAddUsageDescription: Adds frames you save from videos, and sign-in codes, to Photos.
         # Downloads keep going in the background as continued-processing tasks (iOS 26, App/DownloadsView.swift).
         BGTaskSchedulerPermittedIdentifiers: [$(PRODUCT_BUNDLE_IDENTIFIER).downloads.*]
         # The video plays on a connected display (App/ExternalDisplay.swift). iOS 27 also needs the scene

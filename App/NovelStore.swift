@@ -32,24 +32,67 @@ import TVCore
     var theme: NovelTheme { didSet { UserDefaults.standard.set(theme.rawValue, forKey: "novel.theme") } }
     var appearance: NovelAppearance { didSet { UserDefaults.standard.set(appearance.rawValue, forKey: "novel.appearance") } }
     var pageTurn: NovelPageTurn { didSet { UserDefaults.standard.set(pageTurn.rawValue, forKey: "novel.pageTurn") } }
+    /// Space after each paragraph as a multiple of the font size (#1430).
+    var paragraphSpacing: Double { didSet { UserDefaults.standard.set(paragraphSpacing, forKey: "novel.paragraphSpacing") } }
+    /// Space above and below the text, in points, on top of the bands for the title and the page count (#1430).
+    var verticalMargin: Double { didSet { UserDefaults.standard.set(verticalMargin, forKey: "novel.verticalMargin") } }
+    /// iPhone and iPad: pages turn with a curl as in Books (仿真翻页, #1437/#1452) instead of sliding.
+    var curl: Bool { didSet { UserDefaults.standard.set(curl, forKey: "novel.curl") } }
+    /// The script chapters are shown in (#1007).
+    var script: NovelScript { didSet { UserDefaults.standard.set(script.rawValue, forKey: "novel.script") } }
+    /// How strongly the background picture shows through the page colour (#1265).
+    var backgroundOpacity: Double { didSet { UserDefaults.standard.set(backgroundOpacity, forKey: "novel.backgroundOpacity") } }
+    /// The picture behind the page, decoded off the main thread when the reader first opens; nil when none is set.
+    private(set) var backgroundImage: CGImage?
+    @ObservationIgnored private var backgroundLoaded = false
 
     static let lineHeightRange: ClosedRange<Double> = 1.3...2.4
+    static let paragraphSpacingRange: ClosedRange<Double> = 0...1.6
+    static let backgroundOpacityRange: ClosedRange<Double> = 0.1...1
     #if os(tvOS)
     static let fontRange: ClosedRange<Double> = 26...56
     private static let defaultFont = 36.0
     static let marginRange: ClosedRange<Double> = 60...260
     private static let defaultMargin = 140.0
+    static let verticalMarginRange: ClosedRange<Double> = 0...200
     #elseif os(macOS)
     static let fontRange: ClosedRange<Double> = 13...36
     private static let defaultFont = 19.0
     static let marginRange: ClosedRange<Double> = 24...140
     private static let defaultMargin = 64.0
+    static let verticalMarginRange: ClosedRange<Double> = 0...160
     #else
     static let fontRange: ClosedRange<Double> = 13...34
     private static let defaultFont = 19.0
     static let marginRange: ClosedRange<Double> = 10...56
     private static let defaultMargin = 26.0
+    static let verticalMarginRange: ClosedRange<Double> = 0...80
     #endif
+
+    /// Reads the saved background picture once, off the main thread.
+    func loadBackground() async {
+        guard !backgroundLoaded else { return }
+        backgroundLoaded = true
+        backgroundImage = await Task.detached(priority: .userInitiated) { NovelBackgroundImage.load() }.value
+    }
+
+    /// Keeps a downscaled copy of a picked picture and shows it; false when the data isn't an image.
+    func setBackground(_ data: Data) async -> Bool {
+        let image: CGImage? = await Task.detached(priority: .userInitiated) {
+            guard let jpeg = NovelBackgroundImage.prepare(data), (try? NovelBackgroundImage.save(jpeg)) != nil else { return nil }
+            return NovelBackgroundImage.decode(jpeg)
+        }.value
+        guard let image else { return false }
+        backgroundLoaded = true
+        backgroundImage = image
+        return true
+    }
+
+    func removeBackground() {
+        NovelBackgroundImage.remove()
+        backgroundLoaded = true
+        backgroundImage = nil
+    }
 
     private init() {
         let defaults = UserDefaults.standard
@@ -65,6 +108,13 @@ import TVCore
         theme = NovelTheme(rawValue: defaults.string(forKey: "novel.theme") ?? "") ?? .sepia
         appearance = NovelAppearance(rawValue: defaults.string(forKey: "novel.appearance") ?? "") ?? .automatic
         pageTurn = NovelPageTurn(rawValue: defaults.string(forKey: "novel.pageTurn") ?? "") ?? .pages
+        let paragraph = defaults.object(forKey: "novel.paragraphSpacing") as? Double ?? NovelTypeStyle.standardParagraphSpacing
+        paragraphSpacing = Self.paragraphSpacingRange.contains(paragraph) ? paragraph : NovelTypeStyle.standardParagraphSpacing
+        verticalMargin = min(Self.verticalMarginRange.upperBound, max(0, defaults.double(forKey: "novel.verticalMargin")))
+        curl = defaults.bool(forKey: "novel.curl")
+        script = NovelScript(rawValue: defaults.string(forKey: "novel.script") ?? "") ?? .original
+        let opacity = defaults.object(forKey: "novel.backgroundOpacity") as? Double ?? 0.35
+        backgroundOpacity = Self.backgroundOpacityRange.contains(opacity) ? opacity : 0.35
         recompute()
         NotificationCenter.default.addObserver(forName: NovelSources.changedNotification, object: nil, queue: .main) { _ in
             MainActor.assumeIsolated { NovelStore.shared.reloadSources() }
@@ -162,26 +212,33 @@ import TVCore
     }
 
     /// Where reading stopped. Reading a book puts it on the shelf, most recent first.
-    func record(_ book: NovelBook, chapter: NovelChapter, count: Int, position: Double) {
+    func record(_ book: NovelBook, chapter: NovelChapter, count: Int, position: Double, seconds: Double? = nil) {
         var entry = shelfBook(book) ?? NovelLibrary.ShelfBook(book: book)
         entry.book = book
         entry.chapterIndex = chapter.index; entry.chapterTitle = chapter.title; entry.chapterCount = count
-        entry.position = min(1, max(0, position)); entry.updated = Date()
+        entry.position = min(1, max(0, position)); entry.seconds = seconds; entry.updated = Date()
         shelf.removeAll { $0.id == entry.id }
         shelf.insert(entry, at: 0)
         saveShelf()
     }
 
-    /// Reads the shelf's book from another source from now on, keeping the place by chapter title.
+    /// Reads the shelf's book from another source from now on, keeping the place and the bookmarks by chapter title.
     func switchSource(of old: NovelBook, to book: NovelBook, chapters: [NovelChapter]) {
-        guard var entry = shelfBook(old) else { return }
-        entry.book = book
-        let title = NovelChapterTitle.key(entry.chapterTitle)
-        if let match = chapters.first(where: { NovelChapterTitle.key($0.title) == title }) ?? (chapters.indices.contains(entry.chapterIndex) ? chapters[entry.chapterIndex] : nil) {
-            entry.chapterIndex = match.index; entry.chapterTitle = match.title
-        }
-        entry.chapterCount = chapters.count
-        if let index = shelf.firstIndex(where: { $0.id == entry.id }) { shelf[index] = entry }
+        if NovelLibrary.switchSource(&shelf, from: old, to: book, chapters: chapters) { saveShelf() }
+    }
+
+    // MARK: Bookmarks (#1452)
+
+    func bookmarks(_ book: NovelBook) -> [NovelBookmark] { shelfBook(book)?.bookmarks ?? [] }
+    /// Marks a place. Reading has already put the book on the shelf.
+    func addBookmark(_ bookmark: NovelBookmark, to book: NovelBook) {
+        guard let index = shelf.firstIndex(where: { $0.id == book.match }) else { return }
+        shelf[index].mark(bookmark)
+        saveShelf()
+    }
+    func removeBookmark(_ id: NovelBookmark.ID, from book: NovelBook) {
+        guard let index = shelf.firstIndex(where: { $0.id == book.match }) else { return }
+        shelf[index].bookmarks.removeAll { $0.id == id }
         saveShelf()
     }
 
@@ -190,7 +247,7 @@ import TVCore
 
 enum NovelChapterTitle {
     /// A chapter title without spaces and punctuation, to find the same chapter in another source's list.
-    static func key(_ title: String) -> String { title.lowercased().filter { $0.isLetter || $0.isNumber } }
+    static func key(_ title: String) -> String { NovelChapterMatch.key(title) }
 }
 
 /// Turning pages, or one long column to scroll.
@@ -278,10 +335,20 @@ extension Color {
 struct NovelCover: View {
     let book: NovelBook
     var body: some View {
-        if let request = book.coverRequest {
-            PosterImage(url: request.url, headers: request.headers, symbol: "book.closed")
-        } else {
-            NovelPlainCover(title: book.name, author: book.author)
+        Group {
+            if let request = book.coverRequest {
+                PosterImage(url: request.url, headers: request.headers, symbol: "book.closed")
+            } else {
+                NovelPlainCover(title: book.name, author: book.author)
+            }
+        }
+        // An audiobook (#1130) is told from the text of the same title by a headphones mark.
+        .overlay(alignment: .bottomTrailing) {
+            if book.isAudio {
+                Image(systemName: "headphones").font(.caption.weight(.bold)).foregroundStyle(.white)
+                    .padding(6).background(.black.opacity(0.55), in: Circle()).padding(6)
+                    .accessibilityHidden(true)
+            }
         }
     }
 }

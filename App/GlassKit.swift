@@ -1053,6 +1053,11 @@ struct PosterCard: View {
     let poster: URL?
     let headers: [String: String]
     let remarks: String
+    /// Shown while there is no cover.
+    var symbol = "film"
+    init(name: String, poster: URL?, headers: [String: String] = [:], remarks: String = "", symbol: String = "film") {
+        self.name = name; self.poster = poster; self.headers = headers; self.remarks = remarks; self.symbol = symbol
+    }
     init(video: Video) {
         name = video.name; poster = video.poster; headers = video.posterHeaders; remarks = video.remarks
     }
@@ -1063,7 +1068,7 @@ struct PosterCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Color.clear.aspectRatio(2.0 / 3.0, contentMode: .fit)
-                .overlay { PosterImage(url: poster, headers: headers) }
+                .overlay { PosterImage(url: poster, headers: headers, symbol: symbol) }
                 .posterClip(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 .coverOverlay(alignment: .bottomLeading) {
                     if !remarks.isEmpty {
@@ -1385,10 +1390,11 @@ private struct TVPanelStyle: ButtonStyle {
 #endif
 
 extension View {
-    /// A round icon button in the player's top bar.
-    @ViewBuilder func chromeButton() -> some View {
+    /// A round icon button in the player's top bar. `reach`: on iPhone and iPad, points around the circle that take
+    /// its taps too, with the layout unchanged.
+    @ViewBuilder func chromeButton(reach: CGFloat = 0) -> some View {
         #if os(iOS)
-        buttonStyle(ChromeButtonStyle())
+        buttonStyle(ChromeButtonStyle(reach: reach))
         #elseif os(macOS)
         modifier(MacChromeButton())
         #else
@@ -1479,6 +1485,7 @@ extension View {
 /// 44-point glass circles: `ContentControlStyle` ignores the border shape, so its "circles" were
 /// capsules too wide for a phone's player bar.
 private struct ChromeButtonStyle: ButtonStyle {
+    var reach: CGFloat = 0
     @Environment(\.isEnabled) private var enabled
     @Environment(\.chromeGrouped) private var grouped
     func makeBody(configuration: Configuration) -> some View {
@@ -1488,7 +1495,9 @@ private struct ChromeButtonStyle: ButtonStyle {
             // In a button group the group's capsule is the glass; a pressed button lights up inside it.
             .background { if grouped { Circle().fill(.white.opacity(configuration.isPressed ? 0.2 : 0)) } }
             .glassSurface(grouped ? .identity : .regular.interactive(), in: Circle())
-            .contentShape(Circle())
+            .padding(reach)
+            .contentShape(reach > 0 ? AnyShape(Rectangle()) : AnyShape(Circle()))
+            .padding(-reach)
             .opacity(enabled ? (configuration.isPressed ? 0.72 : 1) : 0.38)
     }
 }
