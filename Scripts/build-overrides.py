@@ -43,6 +43,31 @@ LIVE_METHODS = '''    /// The browser from UIKit (see `DocumentPicker`), with `.
 
 '''
 
+# The 映匣 account card and the run of feedback tiles that follows it on iPhone, iPad and Mac.
+ACCOUNT_CARD = re.compile(
+    r"            // Who is signed in: their feedback points, and Pro\.\n"
+    r".*?\n            #endif\n\n",
+    re.S,
+)
+
+# The same two sections on Apple TV.
+ACCOUNT_CARD_TV = '''            if !updates.available.isEmpty { updateSection }
+            TVSettingsSection { AccountSettingsRow() }
+            // First in the list, beside the app: a problem or an idea is one press away.
+            TVSettingsSection {
+                TVSettingsLink(title: L10n.text("Send Feedback")) { FeedbackView() }
+                TVSettingsLink(title: L10n.text("Telegram Group")) { TelegramGroupView() }
+            }
+'''
+
+UPDATE_CHANNEL = (
+    "    static var channel: Channel { Distribution.isTestFlight ? .testFlight"
+    " : Distribution.isAppStore ? .none : .direct }"
+)
+
+LIVE_FEED = 'URL(string: "https://yingxia.getmegaportal.com/releases.json")!'
+DEAD_FEED = 'URL(string: "http://127.0.0.1:9/releases.json")!'
+
 
 def rename_interface_strings() -> int:
     """Only the right-hand side of a .strings entry: the left side is the lookup key."""
@@ -103,8 +128,43 @@ def pick_files_through_uikit() -> int:
     return 0
 
 
+def hide_upstream_accounts() -> list:
+    """Take out the 映匣 account card, the Send Feedback tile and the Telegram group link."""
+    path = ROOT / "App/SettingsView.swift"
+    text = path.read_text(encoding="utf-8")
+    before = text
+    text, phones = ACCOUNT_CARD.subn("", text, count=1)
+    tvs = text.count(ACCOUNT_CARD_TV)
+    text = text.replace(ACCOUNT_CARD_TV, "")
+    if text != before:
+        path.write_text(text, encoding="utf-8")
+    return [phones, tvs]
+
+
+def turn_off_updates() -> list:
+    """No news from the upstream release feed: no fetch, no Software Update row, no What's New."""
+    channel = False
+    path = ROOT / "App/Updates.swift"
+    text = path.read_text(encoding="utf-8")
+    if UPDATE_CHANNEL in text:
+        path.write_text(text.replace(UPDATE_CHANNEL,
+                                     "    static var channel: Channel { .none }"), encoding="utf-8")
+        channel = True
+    feed = False
+    path = ROOT / "Sources/TVCore/ReleaseFeed.swift"
+    text = path.read_text(encoding="utf-8")
+    if LIVE_FEED in text:
+        path.write_text(text.replace(LIVE_FEED, DEAD_FEED), encoding="utf-8")
+        feed = True
+    return [channel, feed]
+
+
 if __name__ == "__main__":
     print(f"renamed {rename_interface_strings()} strings")
     print("widened the file importer" if accept_any_file() else "file importer already widened")
     picked = pick_files_through_uikit()
     print("Add from File now uses DocumentPicker" if picked else "Add from File already uses DocumentPicker")
+    phones, tvs = hide_upstream_accounts()
+    print(f"removed {phones} account/feedback block(s) and {tvs} on Apple TV")
+    channel, feed = turn_off_updates()
+    print(f"update checks off (channel {channel}, feed {feed})")
