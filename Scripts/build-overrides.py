@@ -65,6 +65,103 @@ UPDATE_CHANNEL = (
     " : Distribution.isAppStore ? .none : .direct }"
 )
 
+ACCOUNTS_SECTION = '''            Section(L10n.text("Accounts")) {
+                if store.extrasUnlocked {
+                    FormLink(symbol: "play.tv.fill", tint: .pink, title: L10n.text("Bilibili"), value: bilibiliSummary) { BilibiliAccountView() }
+                    FormLink(symbol: "music.note", tint: .black, title: L10n.text("Douyin"), value: douyinSummary) { DouyinAccountView() }
+                    ForEach(sourceSignIns, id: \\.signIn.id) { entry in
+                        FormLink(symbol: "play.rectangle.on.rectangle.fill", tint: .red, title: entry.signIn.name, value: entry.summary) { SourceAccountView(signIn: entry.signIn) }
+                    }
+                }
+                FormLink(symbol: "externaldrive.fill.badge.person.crop", tint: .brown, title: L10n.text("Cloud Drive Accounts"), value: cloudSummary) { CloudDriveView() }
+            }
+
+'''
+
+PROFILES_SECTION = '''            Section {
+                FormLink(symbol: "person.2.fill", tint: .teal, title: L10n.text("Profiles"), value: store.profile.title) { ProfilesView() }
+            }
+            .id("settings.profiles")
+
+'''
+
+ICLOUD_SECTION = '''            // Only the main profile's library syncs (#1456).
+            if store.profile.isMain {
+                Section {
+                    Toggle(isOn: $syncsWithICloud) {
+                        FormLabel(symbol: "icloud.fill", tint: .blue, title: L10n.text("iCloud Sync"))
+                    }
+                    .settingsSwitch()
+                    .onChange(of: syncsWithICloud) { _, on in store.cloudSync?.setEnabled(on) }
+                } footer: {
+                    Text(SettingsNote.iCloud)
+                }
+            }
+
+'''
+
+TOP_SECTION = '''            Section {
+                settingsTopTiles
+            } footer: {
+                if store.profile.isMain { Text(SettingsNote.iCloud) }
+            }
+            .id("settings.profiles")
+
+'''
+
+TOP_TILES = '''    /// Profiles and iCloud Sync as the two cards under the app's name.
+    private var settingsTopTiles: some View {
+        HStack(spacing: 12) {
+            NavigationLink { ProfilesView() } label: {
+                SettingsTopTile(symbol: "person.2.fill", tint: .teal, title: L10n.text("Profiles"),
+                                status: store.profile.title, active: true)
+            }
+            .buttonStyle(PressableStyle())
+            Button {
+                syncsWithICloud.toggle()
+                store.cloudSync?.setEnabled(syncsWithICloud)
+            } label: {
+                SettingsTopTile(symbol: "icloud.fill", tint: .blue, title: L10n.text("iCloud Sync"),
+                                status: L10n.text(syncsWithICloud ? "In sync" : "Off"), active: syncsWithICloud)
+            }
+            .buttonStyle(PressableStyle())
+        }
+        .listRowInsets(EdgeInsets())
+        .listRowBackground(Color.clear)
+        .accessibilityIdentifier("settings.topTiles")
+    }
+
+'''
+
+TOP_TILE_VIEW = '''
+
+/// The card under the app's name: a symbol, its name and a status line of its own.
+private struct SettingsTopTile: View {
+    let symbol: String
+    let tint: Color
+    let title: String
+    let status: String
+    let active: Bool
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 24, style: .continuous)
+        VStack(alignment: .leading, spacing: 14) {
+            Image(systemName: symbol)
+                .font(.system(size: 29, weight: .semibold))
+                .foregroundStyle(tint)
+            Text(title).font(.title3.weight(.semibold)).foregroundStyle(.primary).lineLimit(1)
+            HStack(spacing: 7) {
+                Circle().fill(active ? Color.green : Color.gray.opacity(0.45)).frame(width: 9, height: 9)
+                Text(status).font(.footnote.weight(.medium)).foregroundStyle(.secondary).lineLimit(1)
+            }
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, minHeight: 128, alignment: .leading)
+        .background(SettingsStyle.rowFill, in: shape)
+        .contentShape(shape)
+    }
+}
+'''
+
 LIVE_FEED = 'URL(string: "https://yingxia.getmegaportal.com/releases.json")!'
 DEAD_FEED = 'URL(string: "http://127.0.0.1:9/releases.json")!'
 
@@ -159,6 +256,26 @@ def turn_off_updates() -> list:
     return [channel, feed]
 
 
+def arrange_settings_top() -> bool:
+    """Profiles and iCloud Sync as two cards under the app's name, with the accounts right below."""
+    path = ROOT / "App/SettingsView.swift"
+    text = path.read_text(encoding="utf-8")
+    if "settingsTopTiles" in text:
+        return False
+    for piece, name in ((ACCOUNTS_SECTION, "the accounts"), (PROFILES_SECTION, "Profiles"),
+                        (ICLOUD_SECTION, "iCloud Sync")):
+        if piece not in text:
+            raise SystemExit(f"App/SettingsView.swift: could not find {name}")
+        text = text.replace(piece, "", 1)
+    text = text.replace("            heroSection\n",
+                        "            heroSection\n\n" + TOP_SECTION + ACCOUNTS_SECTION, 1)
+    text = text.replace("    private var version: String? {\n",
+                        TOP_TILES + "    private var version: String? {\n", 1)
+    text = text + TOP_TILE_VIEW
+    path.write_text(text, encoding="utf-8")
+    return True
+
+
 if __name__ == "__main__":
     print(f"renamed {rename_interface_strings()} strings")
     print("widened the file importer" if accept_any_file() else "file importer already widened")
@@ -168,3 +285,5 @@ if __name__ == "__main__":
     print(f"removed {phones} account/feedback block(s) and {tvs} on Apple TV")
     channel, feed = turn_off_updates()
     print(f"update checks off (channel {channel}, feed {feed})")
+    print("Profiles and iCloud Sync now sit as cards under the name"
+          if arrange_settings_top() else "top of Settings already arranged")
