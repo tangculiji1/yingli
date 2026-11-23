@@ -1,6 +1,10 @@
 import SwiftUI
 import AVKit
 import VideoToolbox
+import CoreImage
+#if os(iOS)
+import Photos
+#endif
 import TVCore
 
 struct PlaybackView: View {
@@ -11,7 +15,21 @@ struct PlaybackView: View {
     #endif
     @Environment(\.dismiss) private var dismiss
     @Environment(Store.self) private var store
+    #if os(iOS)
+    @State private var session: PlaybackSession
+    @State private var pip: PictureInPicture
+
+    /// A video still playing in Picture in Picture after its player closed comes back to the new player as it is.
+    init(channel: Channel, watch: WatchPlayback? = nil) {
+        self.channel = channel
+        self.watch = watch
+        let parked = FloatingPlayback.shared.parked(for: channel)
+        _session = State(initialValue: parked?.session ?? PlaybackSession())
+        _pip = State(initialValue: parked?.pip ?? PictureInPicture())
+    }
+    #else
     @State private var session = PlaybackSession()
+    #endif
     @State private var showsChrome = true
     @State private var hideTask: Task<Void, Never>?
     #if os(iOS)
@@ -73,7 +91,8 @@ struct PlaybackView: View {
                                  exitWhileWaiting: session.showsPicture ? nil : { dismiss() }, episodes: episodeChoices, channels: channelChoices,
                                  lines: session.lines.indices.map { L10n.text("Line %@", "\($0 + 1)") }, line: session.line,
                                  chooseLine: { session.choose(line: $0) }, transportBar: transportBar,
-                                 titleRow: AnyView(TVPlayerTitleRow(channel: channel, session: session, transportBar: transportBar).environment(store))).ignoresSafeArea()
+                                 titleRow: AnyView(TVPlayerTitleRow(channel: channel, session: session, transportBar: transportBar).environment(store)),
+                                 findDanmaku: danmakuFinder).ignoresSafeArea()
                     .onAppear { playbackSpeed = session.player.defaultRate }
             }
             // Until the picture starts, AVKit's player keeps the Back press to itself, so a stream that never
@@ -82,14 +101,18 @@ struct PlaybackView: View {
                 Color.clear.loadingFocus(takeFocus: true) { dismiss() }
                     .accessibilityIdentifier("player.waiting")
             }
-            // In the title-safe corner, over the picture and clear of the transport bar.
-            if showsPlaybackInfo && session.error == nil && session.showsPicture {
-                PlaybackInfoPanel(session: session)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    .transition(.opacity)
+            // In the title-safe corner, over the picture and clear of the transport bar; with the transport bar, so
+            // the picture is the viewer's again when it goes (#1446).
+            Group {
+                if showsPlaybackInfo && session.error == nil && session.showsPicture && transportBar.visible {
+                    PlaybackInfoPanel(session: session)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        .transition(.opacity)
+                }
             }
+            .animation(.easeInOut(duration: 0.3), value: transportBar.visible)
             #elseif os(iOS)
-            MobilePlayerView(channel: channel, session: session, showsDanmaku: $showsDanmaku, upscalesVideo: $upscalesVideo, smoothsVideo: $smoothsVideo,
+            MobilePlayerView(channel: channel, session: session, pip: pip, showsDanmaku: $showsDanmaku, upscalesVideo: $upscalesVideo, smoothsVideo: $smoothsVideo,
                              waiting: waitContent, chromeVisible: chromeVisible, toggleChrome: toggleChrome, poke: poke, hold: holdChrome,
                              close: exit, layout: playerLayout, toggleFullScreen: watch.map { _ in toggleFullScreen })
             #else
@@ -110,6 +133,10 @@ struct PlaybackView: View {
                         .accessibilityValue("\(session.danmaku.count)")
                     Text("Playback position").accessibilityIdentifier("player.qa.position")
                         .accessibilityValue("\(session.position)")
+                    Text("Playback paused").accessibilityIdentifier("player.qa.paused")
+                        .accessibilityValue(session.paused ? "true" : "false")
+                    Text("Playback muted").accessibilityIdentifier("player.qa.muted")
+                        .accessibilityValue(session.muted ? "true" : "false")
                 }
                 .font(.caption2).foregroundStyle(.white)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
@@ -153,11 +180,28 @@ struct PlaybackView: View {
         #endif
         #endif
         .onAppear {
-            startCatalogPlayback(session, channel: channel, store: store); showOnStart()
             #if os(iOS)
+            if FloatingPlayback.shared.take(session) {
+                // Back from Picture in Picture: the video plays on where it is.
+                startCatalogPlayback(session, channel: channel, store: store, resuming: true)
+            } else {
+                FloatingPlayback.shared.end()
+                startCatalogPlayback(session, channel: channel, store: store)
+            }
+            showOnStart()
             ExternalDisplay.shared.attach(session.player)
+            #else
+            startCatalogPlayback(session, channel: channel, store: store); showOnStart()
             #endif
         }
+        #if os(iOS)
+        // Picture in Picture started: the player screen goes, and the video plays on in the window over the app.
+        .onChange(of: pip.floating) { _, floating in
+            guard floating, session.error == nil else { return }
+            FloatingPlayback.shared.park(channel, session: session, pip: pip, store: store)
+            if let watch { watch.leave() } else { dismiss() }
+        }
+        #endif
         #if DEBUG && os(iOS)
         // `-qaWatchFullScreen <seconds>`: a watch page's player goes full screen after that long, for screenshots.
         .task(id: watch != nil) {
@@ -175,7 +219,12 @@ struct PlaybackView: View {
         .onChange(of: showsDanmaku) { _, value in session.catalogDanmaku.enabled = value }
         .onChange(of: session.catalogDanmaku.enabled) { _, value in showsDanmaku = value }
         .onDisappear {
-            hideTask?.cancel(); store.cancelEpisodeSelection(); session.stop()
+            hideTask?.cancel(); store.cancelEpisodeSelection()
+            #if os(iOS)
+            if !FloatingPlayback.shared.holds(session) { session.stop() }
+            #else
+            session.stop()
+            #endif
             #if os(iOS)
             ExternalDisplay.shared.detach(session.player)
             PlayerOrientation.release()
@@ -207,6 +256,13 @@ struct PlaybackView: View {
     #if os(tvOS)
     private func episodeAction(_ step: PlayerStep?) -> EpisodeAction? {
         step.map { EpisodeAction(name: $0.name, busy: $0.busy, channel: $0.channel, play: $0.go) }
+    }
+
+    /// Finding danmaku by hand from the player's Danmaku menu (#1089). None for live channels: their comments are the room's.
+    private var danmakuFinder: (() -> AnyView)? {
+        guard !session.isLive else { return nil }
+        let model = session.catalogDanmaku, name = channel.name
+        return { AnyView(CatalogDanmakuSettingsView(model: model, channelName: name)) }
     }
 
     /// The video's lines and episodes for the player's Episodes menu and info-panel tab: nil for one episode.
@@ -289,7 +345,7 @@ struct PlaybackView: View {
                 Image(systemName: PlayerChannelsSheet.symbol).font(.headline).frame(width: 22, height: 22)
             }
             .chromeButton()
-            CatalogPlaybackActions(channel: channel, session: session)
+            CatalogPlaybackActions(channel: channel, session: session, offersSkip: true)
             if session.qualities.count > 1 {
                 Menu {
                     QualityPicker(session: session)
@@ -387,7 +443,13 @@ struct PlaybackView: View {
         #endif
         hideTask = Task {
             try? await Task.sleep(for: .seconds(delay))
-            if !Task.isCancelled { withAnimation(.smooth(duration: 0.3)) { showsChrome = false } }
+            guard !Task.isCancelled else { return }
+            #if os(iOS)
+            // Not from under a menu opened from them (#1500): it hung over a bare picture, the glass button it grows
+            // out of and back into faded beneath it. They go a few seconds after it closes.
+            if OpenMenu.showing { return scheduleHide() }
+            #endif
+            withAnimation(.smooth(duration: 0.3)) { showsChrome = false }
         }
     }
 
@@ -789,6 +851,8 @@ private struct NativePlayerView: UIViewControllerRepresentable {
     @AppStorage(DanmakuStyle.fontSizeKey) private var danmakuFontSize = DanmakuStyle.standardFontSize
     @AppStorage(DanmakuStyle.opacityKey) private var danmakuOpacity = DanmakuStyle.standardOpacity
     @AppStorage(DanmakuStyle.speedKey) private var danmakuSpeed = DanmakuStyle.standardSpeed
+    @AppStorage(DanmakuStyle.spacingKey) private var danmakuSpacing = DanmakuStyle.standardSpacing
+    @AppStorage(DanmakuDensity.key) private var danmakuDensity = DanmakuDensity.standard
     /// Subtitle files beside the video (#576); the item's own are in AVKit's Subtitles menu.
     var external: ExternalSubtitles? = nil
     /// The source's opening or ending credits playing now, offered as AVKit's Skip button (#256).
@@ -817,6 +881,8 @@ private struct NativePlayerView: UIViewControllerRepresentable {
     var transportBar: TransportBarVisibility? = nil
     /// The title's logo and the video's tags, over the transport bar while it shows (#758).
     var titleRow: AnyView? = nil
+    /// The danmaku picker (#1089), last in the Danmaku menu, which it brings even before any comments load.
+    var findDanmaku: (() -> AnyView)? = nil
     final class Coordinator: NSObject, UIGestureRecognizerDelegate, @preconcurrency AVPlayerViewControllerDelegate {
         var host: UIHostingController<AnyView>?; var listed = ""; var criteria: DisplayCriteriaKeeper?
         var exit: (() -> Void)?
@@ -917,6 +983,12 @@ private struct NativePlayerView: UIViewControllerRepresentable {
         }
         let binding = $showsDanmaku
         var items: [UIMenuElement] = []
+        var find: [UIMenuElement] = []
+        if let findDanmaku, !live {
+            find.append(UIAction(title: L10n.text("Find Danmaku…"), image: UIImage(systemName: "magnifyingglass")) { [weak controller] _ in
+                if let controller { Self.present(UIHostingController(rootView: findDanmaku()), over: controller) }
+            })
+        }
         if !comments.isEmpty {
             let area = danmakuArea
             let areas = DanmakuArea.allCases.map { option in
@@ -934,13 +1006,24 @@ private struct NativePlayerView: UIViewControllerRepresentable {
             let speeds = DanmakuStyle.speeds(including: danmakuSpeed).map { option in
                 UIAction(title: DanmakuStyle.speedTitle(option), state: abs(option - current) < 0.001 ? .on : .off) { _ in speed.wrappedValue = option }
             }
+            let spacing = $danmakuSpacing, density = $danmakuDensity, currentSpacing = DanmakuStyle.lineSpacing(danmakuSpacing)
+            let spacings = DanmakuStyle.spacings.map { option in
+                UIAction(title: DanmakuStyle.spacingTitle(option), state: option == currentSpacing ? .on : .off) { _ in spacing.wrappedValue = option }
+            }
+            let densities = DanmakuDensity.allCases.map { option in
+                UIAction(title: option.title, state: option == danmakuDensity ? .on : .off) { _ in density.wrappedValue = option }
+            }
             items.append(UIMenu(title: L10n.text("Danmaku"), image: UIImage(systemName: DanmakuPreference.symbol), children: [
                 UIAction(title: L10n.text("Show Danmaku"), state: showsDanmaku ? .on : .off) { _ in binding.wrappedValue.toggle() },
                 UIMenu(title: L10n.text("Danmaku Area"), image: UIImage(systemName: "rectangle.tophalf.inset.filled"), children: areas),
                 UIMenu(title: L10n.text("Text Size"), image: UIImage(systemName: "textformat.size"), children: sizes),
                 UIMenu(title: L10n.text("Opacity"), image: UIImage(systemName: "circle.lefthalf.filled"), children: opacities),
                 UIMenu(title: L10n.text("Scroll Speed"), image: UIImage(systemName: "speedometer"), children: speeds),
-            ]))
+                UIMenu(title: L10n.text("Line Spacing"), image: UIImage(systemName: "arrow.up.and.down"), children: spacings),
+                UIMenu(title: L10n.text("Density"), image: UIImage(systemName: "line.3.horizontal.decrease"), children: densities),
+            ] + find))
+        } else if !find.isEmpty {
+            items.append(UIMenu(title: L10n.text("Danmaku"), image: UIImage(systemName: DanmakuPreference.symbol), children: find))
         }
         if qualities.count > 1 {
             let choose = choose
@@ -959,28 +1042,7 @@ private struct NativePlayerView: UIViewControllerRepresentable {
         let skipSource = skipSource
         let skips = skip.map { [UIAction(title: $0.kind == .intro ? L10n.text("Skip Intro") : L10n.text("Skip Outro"), image: UIImage(systemName: "forward.fill")) { _ in skipSource() }] } ?? []
         if controller.contextualActions.map(\.title) != skips.map(\.title) { controller.contextualActions = skips }
-        if let skipping, !live {
-            // No keyboard for a time here: the intro ends, or the outro starts, where the picture is. Each shows what
-            // it holds, or where it may be set.
-            let setSkipping = setSkipping, markSkip = markSkip
-            var options: [UIMenuElement] = [
-                UIAction(title: L10n.text("Automatically skip intro and outro"), state: skipping.enabled ? .on : .off) { _ in
-                    var value = skipping; value.enabled.toggle(); setSkipping(value)
-                },
-                UIAction(title: L10n.text("Intro Ends Here"),
-                         subtitle: skipping.introEnd > 0 ? EpisodeSkipSettings.formatTime(skipping.introEnd) : L10n.text("In the first five minutes")) { _ in markSkip(true) },
-                UIAction(title: L10n.text("Outro Starts Here"),
-                         subtitle: skipping.outroLength > 0 ? L10n.text("%@ before the end", EpisodeSkipSettings.formatTime(skipping.outroLength))
-                            : L10n.text("In the last ten minutes")) { _ in markSkip(false) },
-            ]
-            if skipping.introEnd > 0 || skipping.outroLength > 0 {
-                options.append(UIAction(title: L10n.text("Clear Intro and Outro"), image: UIImage(systemName: "xmark")) { _ in
-                    setSkipping(EpisodeSkipSettings(enabled: skipping.enabled))
-                })
-            }
-            // Not forward.end: beside Next Episode's forward.end.fill it read as a second Next button.
-            items.append(UIMenu(title: L10n.text("Skip intro / outro"), image: UIImage(systemName: "arrow.right.to.line"), children: options))
-        }
+        if let skipping, !live { items.append(SkipTimesMenu.make(skipping, set: setSkipping, mark: markSkip)) }
         if !live {
             let setSpeed = setSpeed, speed = speed
             let options = Self.speeds.map { rate in UIAction(title: Self.speedLabel(rate), state: rate == speed ? .on : .off) { _ in setSpeed(rate) } }
@@ -1086,7 +1148,9 @@ private struct NativePlayerView: UIViewControllerRepresentable {
                 children.append(UIAction(title: L10n.text("ASS styling and effects show as plain text."), attributes: [.disabled]) { _ in })
             }
         }
-        return UIMenu(title: L10n.text("Subtitle Files"), image: UIImage(systemName: external.selected == nil ? "captions.bubble" : "captions.bubble.fill"), children: children)
+        // A file icon, not a speech bubble: AVKit's own Subtitles and Audio button at the end of the bar is a bubble,
+        // and two alike sent people into this one looking for the audio tracks.
+        return UIMenu(title: L10n.text("Subtitle Files"), image: UIImage(systemName: external.selected == nil ? "doc.text" : "doc.text.fill"), children: children)
     }
 
     /// Asks for a subtitle file's address (an SRT, WebVTT or ASS file, or a ZIP archive). The text field takes the
@@ -1273,7 +1337,8 @@ private struct NativePlayerView: UIViewControllerRepresentable {
         arrowWait = Task { [weak self] in
             try? await Task.sleep(for: .seconds(KeyHold.delay))
             guard !Task.isCancelled, let self, self.arrow.wait() else { return }
-            let chosen = UserDefaults.standard.object(forKey: SpeedBoost.key) as? Double
+            // The touch-and-hold speed; its Off (#1149) is for the picture, and the key still plays at the standard one.
+            let chosen = (UserDefaults.standard.object(forKey: SpeedBoost.key) as? Double).flatMap { SpeedBoost.isOn($0) ? $0 : nil }
             self.session?.setBoost(Float(SpeedBoost(rate: chosen ?? SpeedBoost.standard).rate))
         }
     }
@@ -1509,15 +1574,28 @@ private struct DesktopPlaybackView: View {
     @State private var fillsFrame = false
     @State private var floats = false
     @State private var idle = ChromeIdle()
+    /// Save Frame in the options (#1342).
+    @State private var frames = FrameSaver()
     @AppStorage(DanmakuPreference.key) private var showsDanmaku = true
     @State private var showsDanmakuList = false
     @State private var showsDanmakuSettings = false
+    @State private var showsSkip = false
     @State private var showsEpisodes = false
     @State private var showsChannels = false
     @AppStorage(PlaybackInfo.key) private var showsPlaybackInfo = false
     /// Devices with Yingxia open, for the Play On button; and the one the video was sent to.
     @State private var tvBrowser = PlayOnBrowser()
     @State private var playingOn: String?
+
+    /// Stops the TV and carries on here from where it reached (#749).
+    private func playHereFromTV() {
+        Task {
+            let reached = await CastController.shared.stop()
+            playingOn = nil
+            if let reached, reached > 0, !session.isLive { await session.player.seek(to: CMTime(seconds: reached, preferredTimescale: 600)) }
+            if session.paused { session.togglePlayback() }
+        }
+    }
     @State private var importsSubtitleFile = false
     @State private var asksSubtitleAddress = false
     @State private var searchesSubtitles = false
@@ -1538,14 +1616,18 @@ private struct DesktopPlaybackView: View {
                 SubtitleOverlay(cues: session.subtitles, fills: fillsFrame).ignoresSafeArea()
                 SourceSkipButton(session: session)
                 DesktopBoostLabel(session: session)
-                // Under the title bar's buttons and AVKit's row of controls below them (macOS 26), so it stays put while
-                // they come and go.
-                if showsPlaybackInfo && session.error == nil && session.showsPicture && playingOn == nil {
-                    PlaybackInfoPanel(session: session)
-                        .padding(.leading, 16).padding(.top, 96)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                        .transition(.opacity)
+                FrameSaverNotice(saver: frames, top: 60)
+                // Under the title bar's buttons and AVKit's row of controls below them (macOS 26), and with them: it
+                // goes when they do, so the picture is the viewer's again (#1446).
+                Group {
+                    if showsPlaybackInfo && session.error == nil && session.showsPicture && playingOn == nil && showsChrome {
+                        PlaybackInfoPanel(session: session)
+                            .padding(.leading, 16).padding(.top, 96)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                            .transition(.opacity)
+                    }
                 }
+                .animation(.easeOut(duration: 0.2), value: showsChrome)
                 if let error = session.error {
                     ErrorState(title: L10n.text("Can't play this right now"), message: error, details: "", symbol: session.errorSymbol,
                                retry: { startCatalogPlayback(session, channel: channel, store: store) })
@@ -1555,9 +1637,13 @@ private struct DesktopPlaybackView: View {
                 }
                 if let playingOn {
                     Color.black
-                    PlayOnPlaceholder(receiver: playingOn) {
-                        self.playingOn = nil
-                        if session.paused { session.togglePlayback() }
+                    if CastController.shared.device?.name == playingOn {
+                        CastPanel { playHereFromTV() }
+                    } else {
+                        PlayOnPlaceholder(receiver: playingOn) {
+                            self.playingOn = nil
+                            if session.paused { session.togglePlayback() }
+                        }
                     }
                 }
             }
@@ -1584,9 +1670,13 @@ private struct DesktopPlaybackView: View {
             }
         }
         .onChange(of: showsChrome) { _, value in setTrafficLights(visible: value) }
-        .onAppear { floats = window.level == .floating; idle.attach(window); tvBrowser.start() }
+        .onAppear { floats = window.level == .floating; idle.attach(window); tvBrowser.start(); CastController.shared.refresh() }
         // Played here again (Space, say): the other device no longer has it to itself.
-        .onChange(of: session.paused) { _, paused in if !paused { playingOn = nil } }
+        .onChange(of: session.paused) { _, paused in
+            guard !paused else { return }
+            playingOn = nil
+            if CastController.shared.device != nil { Task { await CastController.shared.stop() } }
+        }
         .playerEpisodesSheet(isPresented: $showsEpisodes, channel: channel)
         .playerChannelsSheet(isPresented: $showsChannels, channel: channel, session: session)
         .sheet(isPresented: $showsDanmakuList) {
@@ -1596,7 +1686,8 @@ private struct DesktopPlaybackView: View {
         .sheet(isPresented: $showsDanmakuSettings) {
             CatalogDanmakuSettingsView(model: session.catalogDanmaku, channelName: channel.name).playerSheet()
         }
-        .onDisappear { idle.detach(); tvBrowser.stop() }
+        .sheet(isPresented: $showsSkip) { EpisodeSkipSettingsView(session: session).environment(store) }
+        .onDisappear { idle.detach(); tvBrowser.stop(); CastController.shared.detach() }
         .subtitleImport(files: $importsSubtitleFile, address: $asksSubtitleAddress, search: $searchesSubtitles, subtitles: session.externalSubtitles)
         // A subtitle file dropped on the video shows on it (#576).
         .dropDestination(for: URL.self) { urls, _ in
@@ -1643,7 +1734,7 @@ private struct DesktopPlaybackView: View {
                         .playerBarButton()
                 }
                 .buttonStyle(.plain)
-                if !tvBrowser.receivers.isEmpty {
+                if !tvBrowser.receivers.isEmpty || !CastController.shared.devices.isEmpty {
                     PlayOnButton(channel: channel, session: session, browser: tvBrowser) { receiver in
                         session.player.pause()
                         playingOn = receiver
@@ -1673,8 +1764,8 @@ private struct DesktopPlaybackView: View {
     }
 
     private var optionsMenu: some View {
-        DesktopOptionsMenu(channel: channel, session: session, window: window, hasDanmaku: !session.danmaku.isEmpty, fillsFrame: $fillsFrame, floats: $floats,
-                           showsDanmakuList: $showsDanmakuList, showsDanmakuSettings: $showsDanmakuSettings,
+        DesktopOptionsMenu(channel: channel, session: session, window: window, frames: frames, hasDanmaku: !session.danmaku.isEmpty, fillsFrame: $fillsFrame, floats: $floats,
+                           showsDanmakuList: $showsDanmakuList, showsDanmakuSettings: $showsDanmakuSettings, showsSkip: $showsSkip,
                            importsSubtitleFile: $importsSubtitleFile, asksSubtitleAddress: $asksSubtitleAddress, searchesSubtitles: $searchesSubtitles)
             .equatable()
     }
@@ -1694,12 +1785,14 @@ private struct DesktopOptionsMenu: View, Equatable {
     let channel: Channel
     let session: PlaybackSession
     let window: PlaybackWindow
+    let frames: FrameSaver
     /// Whether there are comments at all, not the comments: those change with every message.
     let hasDanmaku: Bool
     @Binding var fillsFrame: Bool
     @Binding var floats: Bool
     @Binding var showsDanmakuList: Bool
     @Binding var showsDanmakuSettings: Bool
+    @Binding var showsSkip: Bool
     @Binding var importsSubtitleFile: Bool
     @Binding var asksSubtitleAddress: Bool
     @Binding var searchesSubtitles: Bool
@@ -1711,13 +1804,15 @@ private struct DesktopOptionsMenu: View, Equatable {
 
     /// The bindings and settings reach the menu by themselves; only these decide what it is built from.
     nonisolated static func == (a: Self, b: Self) -> Bool {
-        a.session === b.session && a.window === b.window && a.hasDanmaku == b.hasDanmaku && a.channel == b.channel
+        a.session === b.session && a.window === b.window && a.frames === b.frames && a.hasDanmaku == b.hasDanmaku && a.channel == b.channel
     }
 
     var body: some View {
         @Bindable var session = session
         Menu {
             Toggle(L10n.text("Loop Playback"), isOn: $session.looping)
+            // A series' intro and outro (#1488), with the player's other settings.
+            if session.canSkip, !session.isLive { SkipTimesMenuButton(session: session) { showsSkip = true } }
             SleepTimerMenu(item: .episode, offersEnd: !session.isLive)
             Toggle(L10n.text("Fill Window"), isOn: $fillsFrame)
             Toggle(L10n.text("Float on Top"), isOn: $floats)
@@ -1741,6 +1836,9 @@ private struct DesktopOptionsMenu: View, Equatable {
                     .accessibilityIdentifier("player.danmakuSettings")
                 Button(L10n.text("Danmaku List…")) { showsDanmakuList = true }.disabled(!hasDanmaku)
             }
+            // The frame on screen, to the Pictures folder at the video's own size (#1342).
+            Button(L10n.text("Save Frame")) { frames.save(session.player, title: channel.name) }
+                .accessibilityIdentifier("player.saveFrame")
             Divider()
             Button(L10n.text("Enter / Exit Full Screen")) { window.toggleFullScreen(nil) }
             Button(L10n.text("Retry")) { startCatalogPlayback(session, channel: channel, store: store) }
@@ -1923,7 +2021,9 @@ extension Store {
 }
 
 /// Shared setup leaves the native AVKit controls and Bilibili resolution intact.
-@MainActor private func startCatalogPlayback(_ session: PlaybackSession, channel: Channel, store: Store) {
+/// `resuming`: the session already plays the channel (back from Picture in Picture), and only its links to the store are
+/// made again.
+@MainActor private func startCatalogPlayback(_ session: PlaybackSession, channel: Channel, store: Store, resuming: Bool = false) {
     session.history = store.playbackHistory
     // The video page's TMDB match names the video for subtitle sources (#576 M2).
     session.externalSubtitles.tmdbKey = { [weak store] channel in
@@ -1932,7 +2032,7 @@ extension Store {
     session.skipDefaults = store.playbackDefaults
     session.catalogDanmaku.enabled = UserDefaults.standard.object(forKey: DanmakuPreference.key) == nil
         || UserDefaults.standard.bool(forKey: DanmakuPreference.key)
-    session.start(channel)
+    if !resuming { session.start(channel) }
     session.onPlaybackEnded = { [weak store] in
         guard let store, store.autoPlayNext else { return }
         if let file = store.nextFile(after: channel) { store.playing = file }
@@ -2333,6 +2433,170 @@ struct PlayerChaptersView: View {
             }
         }
         .frame(width: 320)
+    }
+}
+#endif
+
+#if !os(tvOS)
+/// Save Frame in the player's options (#1342, #1332): the frame on screen at the video's own size, to Photos on iPhone and
+/// iPad and to the Pictures folder on the Mac, for a wallpaper, say. It is taken from the decoded picture, not the
+/// screen, so the controls, danmaku and subtitles stay out of it, and an HDR frame is saved as HDR.
+@MainActor @Observable final class FrameSaver {
+    enum Outcome: Equatable {
+        case saved(String)
+        case failed(String)
+    }
+    private(set) var busy = false
+    /// Said over the picture for a moment.
+    private(set) var outcome: Outcome?
+    @ObservationIgnored private var clearTask: Task<Void, Never>?
+
+    func save(_ player: AVPlayer, title: String) {
+        guard !busy, let item = player.currentItem else { return }
+        busy = true
+        let position = item.currentTime().seconds
+        Task {
+            var result = Outcome.failed(L10n.text("Couldn't save this frame"))
+            if let frame = await Self.frame(of: item, paused: player.rate == 0) {
+                nonisolated(unsafe) let pixels = frame
+                let encoded = await Task.detached(priority: .userInitiated) { Self.encode(pixels) }.value
+                if let encoded { result = await Self.keep(encoded.data, named: Self.fileName(title, at: position, type: encoded.type)) }
+            }
+            busy = false
+            show(result)
+        }
+    }
+
+    private func show(_ result: Outcome) {
+        withAnimation(.easeOut(duration: 0.2)) { outcome = result }
+        clearTask?.cancel()
+        clearTask = Task {
+            try? await Task.sleep(for: .seconds(2.5))
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeOut(duration: 0.3)) { outcome = nil }
+        }
+    }
+
+    /// The frame showing now, from an output added for this one ask and taken off again. A paused video decodes nothing
+    /// new for it, so the same moment is asked for once more.
+    private static func frame(of item: AVPlayerItem, paused: Bool) async -> CVPixelBuffer? {
+        let output = AVPlayerItemVideoOutput(outputSettings: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
+            // The source's own colors and range (HDR too), not a conversion to HD video's.
+            AVVideoAllowWideColorKey: true,
+        ])
+        item.add(output)
+        defer { item.remove(output) }
+        for attempt in 0..<20 {
+            if let buffer = output.copyPixelBuffer(forItemTime: item.currentTime(), itemTimeForDisplay: nil) { return buffer }
+            if attempt == 2, paused { await item.seek(to: item.currentTime(), toleranceBefore: .zero, toleranceAfter: .zero) }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        return nil
+    }
+
+    /// HEIF in the frame's own color space: 10 bits for HDR (PQ or HLG), else 8. JPEG where HEIF can't be written.
+    nonisolated private static func encode(_ buffer: CVPixelBuffer) -> (data: Data, type: String)? {
+        let image = CIImage(cvPixelBuffer: buffer)
+        let context = CIContext()
+        let transfer = CVBufferCopyAttachment(buffer, kCVImageBufferTransferFunctionKey, nil) as? String
+        let hdr: CFString? = transfer == kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ as String ? CGColorSpace.itur_2100_PQ
+            : transfer == kCVImageBufferTransferFunction_ITU_R_2100_HLG as String ? CGColorSpace.itur_2100_HLG : nil
+        if let hdr, let space = CGColorSpace(name: hdr), let data = try? context.heif10Representation(of: image, colorSpace: space, options: [:]) {
+            return (data, "heic")
+        }
+        let space = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        let quality = [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.95]
+        if let data = context.heifRepresentation(of: image, format: .RGBA8, colorSpace: space, options: quality) { return (data, "heic") }
+        return context.jpegRepresentation(of: image, colorSpace: space, options: quality).map { ($0, "jpg") }
+    }
+
+    /// `Title 12.34.heic`: the video's name and where in it the frame is.
+    private static func fileName(_ title: String, at seconds: Double, type: String) -> String {
+        let name = title.components(separatedBy: CharacterSet(charactersIn: "/:\\")).joined(separator: " ").trimmingCharacters(in: .whitespaces)
+        guard seconds.isFinite, seconds >= 0 else { return "\(name.isEmpty ? "Yingxia" : name).\(type)" }
+        let whole = Int(seconds)
+        let time = whole >= 3600 ? String(format: "%d.%02d.%02d", whole / 3600, whole / 60 % 60, whole % 60) : String(format: "%d.%02d", whole / 60, whole % 60)
+        return "\(name.isEmpty ? "Yingxia" : name) \(time).\(type)"
+    }
+
+    #if os(iOS)
+    private static func keep(_ data: Data, named name: String) async -> Outcome {
+        let access = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+        guard access == .authorized || access == .limited else { return .failed(L10n.text("Allow Yingxia to add photos in Settings, then try again.")) }
+        do {
+            try await addToPhotos(data, named: name)
+            return .saved(L10n.text("Saved to Photos"))
+        } catch {
+            return .failed(L10n.text("Couldn't save this frame"))
+        }
+    }
+
+    /// Photos runs the change on its own queue: the closure must not belong to the main actor.
+    nonisolated private static func addToPhotos(_ data: Data, named name: String) async throws {
+        try await PHPhotoLibrary.shared().performChanges {
+            let options = PHAssetResourceCreationOptions()
+            options.originalFilename = name
+            PHAssetCreationRequest.forAsset().addResource(with: .photo, data: data, options: options)
+        }
+    }
+    #else
+    private static func keep(_ data: Data, named name: String) async -> Outcome {
+        guard let folder = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first else {
+            return .failed(L10n.text("Couldn't save this frame"))
+        }
+        var url = folder.appending(path: name)
+        let stem = url.deletingPathExtension().lastPathComponent, type = url.pathExtension
+        var copy = 2
+        while FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) {
+            url = folder.appending(path: "\(stem) \(copy).\(type)"); copy += 1
+        }
+        do {
+            try data.write(to: url, options: .atomic)
+            return .saved(L10n.text("Saved to Pictures"))
+        } catch {
+            return .failed(L10n.text("Couldn't save this frame"))
+        }
+    }
+    #endif
+}
+
+/// What Save Frame did, over the picture for a moment.
+struct FrameSaverNotice: View {
+    let saver: FrameSaver
+    var top: CGFloat = 24
+
+    var body: some View {
+        Group {
+            if let outcome = saver.outcome {
+                let (text, symbol) = switch outcome {
+                case .saved(let text): (text, "checkmark.circle.fill")
+                case .failed(let text): (text, "exclamationmark.triangle.fill")
+                }
+                Label(text, systemImage: symbol)
+                    .font(.subheadline.weight(.semibold)).lineLimit(2).multilineTextAlignment(.center)
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 16).padding(.vertical, 10)
+                    .glassSurface(.regular, in: Capsule())
+                    .environment(\.colorScheme, .dark)
+                    .padding(.horizontal, 24)
+                    .padding(.top, top)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("player.frameSaved")
+            }
+        }
+        #if os(iOS)
+        .sensoryFeedback(trigger: saver.outcome) { _, new in
+            switch new {
+            case .saved?: .success
+            case .failed?: .error
+            case nil: nil
+            }
+        }
+        #endif
     }
 }
 #endif

@@ -39,6 +39,8 @@ import TVCore
         WindowGroup {
             // Store, Updates and Announcements go in last, below: sheets attached here show outside RootView.
             RootView()
+                // Opening another profile starts every page again, so none of the last profile's stays on screen (#1456).
+                .id(store.profile.id)
                 #if !os(tvOS)
                 // tvOS draws plain buttons and section links in the tint, so it keeps the neutral default.
                 .modifier(ThemeTint())
@@ -103,6 +105,10 @@ import TVCore
                 #endif
                 // A launch that ends while active, without passing through here, crashed or was ended.
                 .onChange(of: scenePhase, initial: true) { _, phase in ErrorReports.shared.onScreen(phase == .active) }
+                // A day of use earns a point while signed in (Settings › Account).
+                .onChange(of: scenePhase, initial: true) { _, phase in
+                    if phase == .active { Task { await AccountStore.shared.markActiveDay() } }
+                }
                 .onChange(of: scenePhase) { _, phase in
                     if phase == .background {
                         Task { _ = await Diagnostics.shared.snapshot(); ErrorReports.shared.save() }

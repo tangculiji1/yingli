@@ -130,6 +130,10 @@ enum QALaunch {
             }
             await store.importSubscription(address: subscription)
         }
+        // `-qaOpenProfile <name>` opens that profile, adding it first if there is none by that name; `main` is the main one.
+        if let name = UserDefaults.standard.string(forKey: "qaOpenProfile") {
+            store.openProfile(name == "main" ? .main : Profiles.shared.all.first { $0.name == name } ?? Profiles.shared.add(named: name))
+        }
         if QASweep.enabled, let config = store.subscription { Task.detached(priority: .utility) { await QASweep.run(config) } }
         // `-qaSeedHistory <source key>:<video id>` records that video's first episode as part watched, for Watch Now's
         // Up Next and Continue Watching.
@@ -323,6 +327,18 @@ enum QALaunch {
             appIconPage
         } else if section == self.section, page == "color-theme" {
             ColorThemeSettingsView()
+        } else if section == self.section, page == "profiles" {
+            // `-qaPage profiles`: Settings › Profiles (#1456).
+            ProfilesView()
+        } else if section == self.section, page == "account" {
+            // `-qaPage account`: Settings › Account; `-qaAccounts <url>` for a local server (Services/accounts/test/serve.mjs).
+            AccountView()
+        } else if section == self.section, page == "points" {
+            // `-qaPage points`: How Points Work.
+            PointsGuideView()
+        } else if section == self.section, page == "feedback" {
+            // `-qaPage feedback`: Send Feedback, with or without a subscription.
+            FeedbackView()
         } else if section == self.section, let page, let config = store.subscription {
             let parts = page.split(separator: ":", maxSplits: 2).map(String.init)
             switch parts.first {
@@ -374,10 +390,17 @@ enum QALaunch {
                 if let index = Int(parts.dropFirst().first ?? ""), config.lives.indices.contains(index) {
                     ChannelListView(source: config.lives[index])
                 }
-            // `-qaPage folder:<quark|uc|alist|drive key>:<folder>` opens that Cloud Files folder.
+            // `-qaPage folder:<quark|uc|alist|drive key>:<folder>` opens that Cloud Files folder; `-qaFilesPosters 1` as posters.
             case "folder":
                 if parts.count == 3, let drive = filesDrive(parts[1]) {
-                    CloudFolderView(drive: drive, folder: parts[2], name: folderName(parts[2], drive))
+                    CloudFolderView(drive: drive, folder: parts[2], name: folderName(parts[2], drive),
+                                    inheritsPosters: UserDefaults.standard.bool(forKey: "qaFilesPosters"))
+                }
+            // `-qaPage files-title:<quark|uc|alist|drive key>:<folder>` opens that folder as a title, as its poster does (#880).
+            case "files-title":
+                if parts.count == 3, let drive = filesDrive(parts[1]) {
+                    VideoDetailView(video: CloudFilesSource.titleVideo(CloudFile(id: parts[2], name: folderName(parts[2], drive), isFolder: true)),
+                                    client: CloudFilesSource.client(drive, origin: config.origin))
                 }
             case "alist-add": QASheet { AListServerForm(server: AListServer(name: "", address: "")) {} }
             case "runtime": RuntimeView()
@@ -398,7 +421,6 @@ enum QALaunch {
             case "novel-list":
                 if let list = NovelStore.shared.lists.dropFirst(Int(parts.dropFirst().first ?? "") ?? 0).first { NovelListView(url: list.address) }
             case "logs": DiagnosticsView()
-            case "feedback": FeedbackView()
             #if os(tvOS)
             case "telegram": TelegramGroupView()
             #endif
@@ -439,9 +461,7 @@ enum QALaunch {
             case "live-plugin-qr":
                 if let plugin = parts.dropFirst().first.flatMap({ LivePlugins.shared.installed($0) }) { QALivePluginQR(plugin: plugin) }
             case "danmaku-list": QADanmakuList()
-            #if !os(tvOS)
             case "danmaku-settings": QADanmakuSettings()
-            #endif
             // `-qaPage cloud-login:<quark|uc|baidu|aliyun|pan115|tianyi|pan123|guangya>`; `cloud-accounts` shows the accounts page.
             case "cloud-login": CloudQRLoginView(drive: parts.dropFirst().first.flatMap(CloudDriveQRLogin.Drive.init(rawValue:)) ?? .quark) {}
             case "cloud-accounts": CloudDriveView()
@@ -487,7 +507,7 @@ enum QALaunch {
 
     static func overrides(_ section: AppSection) -> Bool {
         guard section == self.section, let page else { return false }
-        return ["site", "setting", "detail", "open-detail", "channels", "runtime", "subscription", "novel-list", "arrange-subscriptions", "logs", "feedback", "telegram", "cache", "playback", "privacy", "licenses", "app-icon", "color-theme", "cloud-login", "cloud-accounts", "subtitle-style", "danmaku-style", "book-sources", "drive-sign-in", "bilibili-account", "douyin-account", "douyin-login", "douyin-handoff", "bilibili-live", "live", "danmaku-list", "danmaku-settings", "web-sign-in", "plugin-sign-in", "catpaw-sign-in", "folder", "alist-add", "up", "comments", "chapters", "live-plugins", "live-plugin", "live-plugin-sign-in", "live-plugin-qr"].contains(page.split(separator: ":").first.map(String.init) ?? "")
+        return ["site", "setting", "detail", "open-detail", "channels", "runtime", "subscription", "novel-list", "arrange-subscriptions", "logs", "feedback", "telegram", "cache", "playback", "privacy", "licenses", "app-icon", "color-theme", "profiles", "account", "points", "cloud-login", "cloud-accounts", "subtitle-style", "danmaku-style", "book-sources", "drive-sign-in", "bilibili-account", "douyin-account", "douyin-login", "douyin-handoff", "bilibili-live", "live", "danmaku-list", "danmaku-settings", "web-sign-in", "plugin-sign-in", "catpaw-sign-in", "folder", "files-title", "alist-add", "up", "comments", "chapters", "live-plugins", "live-plugin", "live-plugin-sign-in", "live-plugin-qr"].contains(page.split(separator: ":").first.map(String.init) ?? "")
     }
 }
 
@@ -652,19 +672,23 @@ enum QASweep {
 
 private extension Int { var nonZero: Int? { self == 0 ? nil : self } }
 
-#if !os(tvOS)
 /// `-qaPage danmaku-settings`: the player's Danmaku sheet over a page's player, which makes only its own views dark.
+/// On Apple TV it covers the screen, as the player's Danmaku menu presents it (#1089).
 private struct QADanmakuSettings: View {
     @State private var model = CatalogDanmakuModel()
     var body: some View {
+        #if os(tvOS)
+        Color.black.ignoresSafeArea()
+            .fullScreenCover(isPresented: .constant(true)) { CatalogDanmakuSettingsView(model: model, channelName: "仙逆 · 第01集") }
+        #else
         Color.black.ignoresSafeArea()
             .sheet(isPresented: .constant(true)) {
                 CatalogDanmakuSettingsView(model: model, channelName: "仙逆 · 第01集").playerSheet()
             }
             .environment(\.colorScheme, .dark)
+        #endif
     }
 }
-#endif
 
 /// `-qaPage danmaku-list`: the player's 弹幕 tab with sample comments, to check the focused row.
 private struct QADanmakuList: View {

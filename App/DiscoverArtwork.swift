@@ -1,4 +1,5 @@
 import SwiftUI
+import Accelerate
 import CoreImage
 import ImageIO
 import TVCore
@@ -16,7 +17,7 @@ struct DiscoverPaint: @unchecked Sendable {
 
 actor DiscoverPainter {
     static let shared = DiscoverPainter()
-    private let context = CIContext(options: [.cacheIntermediates: false])
+    private lazy var context = CIContext(options: [.cacheIntermediates: false])
     private var cache: [String: DiscoverPaint] = [:]
     private var order: [String] = []
     private var pending: [String: Task<DiscoverPaint?, Never>] = [:]
@@ -55,6 +56,13 @@ actor DiscoverPainter {
                 kCGImageSourceShouldCacheImmediately: true,
               ] as CFDictionary) else { return nil }
         let rgb = palette(decoded)
+        #if os(iOS)
+        // On Mac, Core Image can leave Metal's shared archive locked when the iOS app is suspended.
+        if ProcessInfo.processInfo.isiOSAppOnMac {
+            guard let result = Self.renderWithCoreGraphics(decoded, tint: rgb, soft: soft) else { return nil }
+            return DiscoverPaint(image: result, red: rgb.0, green: rgb.1, blue: rgb.2)
+        }
+        #endif
         let image = CIImage(cgImage: decoded)
         let rect = image.extent
         let blurred = image.clampedToExtent().applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: rect.width * (soft ? 0.09 : 0.055)]).cropped(to: rect)
@@ -74,6 +82,69 @@ actor DiscoverPainter {
         let composited = fade.composited(over: progressive)
         guard let result = context.createCGImage(composited, from: rect) else { return nil }
         return DiscoverPaint(image: result, red: rgb.0, green: rgb.1, blue: rgb.2)
+    }
+
+    private static func renderWithCoreGraphics(_ image: CGImage, tint: (Double, Double, Double), soft: Bool) -> CGImage? {
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        func bitmap(width: Int, height: Int) -> CGContext? {
+            CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                      space: colorSpace, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        }
+
+        let width = image.width, height = image.height
+        let rect = CGRect(x: 0, y: 0, width: width, height: height)
+        guard let blurred = Self.blurred(image, sigma: soft ? 0.09 : 0.055, space: colorSpace),
+              let output = bitmap(width: width, height: height) else { return nil }
+        output.interpolationQuality = .high
+
+        func gradient(_ bottom: CGColor, _ top: CGColor, from lower: CGFloat, to upper: CGFloat) {
+            guard let ramp = CGGradient(colorsSpace: colorSpace, colors: [bottom, top] as CFArray, locations: [0, 1]) else { return }
+            output.drawLinearGradient(ramp, start: CGPoint(x: 0, y: rect.height * lower),
+                                      end: CGPoint(x: 0, y: rect.height * upper),
+                                      options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+        }
+
+        if soft {
+            output.draw(blurred, in: rect)
+        } else {
+            output.draw(image, in: rect)
+            output.beginTransparencyLayer(auxiliaryInfo: nil)
+            output.draw(blurred, in: rect)
+            output.setBlendMode(.destinationIn)
+            gradient(CGColor(gray: 1, alpha: 1), CGColor(gray: 1, alpha: 0), from: 0.38, to: 0.62)
+            output.endTransparencyLayer()
+        }
+
+        let color = CGColor(srgbRed: tint.0, green: tint.1, blue: tint.2, alpha: 1)
+        gradient(color, color.copy(alpha: 0) ?? color, from: 0.015, to: 0.52)
+        return output.makeImage()
+    }
+
+    /// Core Image's Gaussian blur, on the CPU: a copy small enough to be quick, blurred with four box passes (as good as a
+    /// Gaussian at this size), which the full-size draw then enlarges smoothly. Without the blur, a copy that small
+    /// enlarged into visible squares. `sigma` is a fraction of the width, like the Core Image radius above.
+    private static func blurred(_ image: CGImage, sigma: Double, space: CGColorSpace) -> CGImage? {
+        let width = min(image.width, 192)
+        let height = max(1, Int((Double(image.height) * Double(width) / Double(image.width)).rounded()))
+        let rowBytes = width * 4
+        guard let small = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: rowBytes,
+                                    space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+              let pixels = small.data, let scratch = malloc(rowBytes * height) else { return nil }
+        defer { free(scratch) }
+        small.interpolationQuality = .high
+        small.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        // n passes of a box w pixels wide spread a pixel as far as a Gaussian with the variance n(w^2 - 1)/12.
+        let deviation = Double(width) * sigma
+        let box = UInt32((3 * deviation * deviation + 1).squareRoot().rounded()) | 1
+        var picture = vImage_Buffer(data: pixels, height: vImagePixelCount(height), width: vImagePixelCount(width), rowBytes: rowBytes)
+        var spare = vImage_Buffer(data: scratch, height: vImagePixelCount(height), width: vImagePixelCount(width), rowBytes: rowBytes)
+        for _ in 0..<2 {
+            // Edge-extended, as `clampedToExtent()` is for Core Image; every channel is blurred alike, alpha included.
+            guard vImageBoxConvolve_ARGB8888(&picture, &spare, nil, 0, 0, box, box, nil, vImage_Flags(kvImageEdgeExtend)) == kvImageNoError,
+                  vImageBoxConvolve_ARGB8888(&spare, &picture, nil, 0, 0, box, box, nil, vImage_Flags(kvImageEdgeExtend)) == kvImageNoError
+            else { return nil }
+        }
+        return small.makeImage()
     }
 
     private func palette(_ image: CGImage) -> (Double, Double, Double) {

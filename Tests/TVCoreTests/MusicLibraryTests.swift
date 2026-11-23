@@ -201,6 +201,33 @@ private struct FakeSongs: MusicCatalogSource {
     #expect(MusicMatching.byArtist([qing], query: " ").isEmpty)
 }
 
+@Test func pinyinNamesAChineseArtist() {
+    func track(_ id: String, _ title: String, _ artists: [String]) -> MusicTrack {
+        var track = song(title, id); track.artists = artists; return track
+    }
+    let poem = track("1", "父亲写的散文诗", ["许飞"]), dj = track("2", "Bad and Boujee (XUFEIH remix)", ["XUFEIH"])
+    let eason = track("3", "富士山下", ["陈奕迅"])
+    // The whole name in pinyin, with or without a space, wins over a Latin name that only starts with it.
+    #expect(MusicMatching.byArtist([dj, poem, eason], query: "xufei") == [poem])
+    #expect(MusicMatching.byArtist([dj, poem, eason], query: "Xu Fei") == [poem])
+    #expect(MusicMatching.byArtist([dj, poem, eason], query: "chenyixun") == [eason])
+    // Han characters still compare as characters, and Latin names as letters.
+    #expect(MusicMatching.byArtist([dj, poem], query: "许飞") == [poem])
+    #expect(MusicMatching.byArtist([dj, poem], query: "xufeih") == [dj])
+    #expect(MusicMatching.rank([dj, poem], query: "xufei") == [poem, dj])
+    #expect(MusicMatching.score(poem, query: "xufei") == MusicMatching.score(poem, query: "许飞"))
+    #expect(MusicMatching.pinyin("Taylor Swift") == nil)
+
+    func album(_ title: String, _ owner: String) -> MusicCollection {
+        MusicCollection(kind: .album, platform: .qq, collectionID: title, title: title, subtitle: owner)
+    }
+    let feature = album("Wind String (ft. Xufei Gao & Yetong Gu)", "Wasabi Spectrum"), own = album("少年去游荡", "许飞")
+    let named = album("许飞", "许飞"), other = album("许飞的歌", "某人")
+    #expect(MusicCollections.rank([feature, own], query: "xufei") == [own, feature])
+    // The artist's own albums before another's album with the name in its title; one titled the query stays first.
+    #expect(MusicCollections.rank([other, own, named], query: "许飞") == [named, own, other])
+}
+
 /// One page of songs per call, by page number.
 private struct PagedSongs: MusicCatalogSource {
     let platform: MusicPlatform
@@ -261,4 +288,26 @@ private struct PagedSongs: MusicCatalogSource {
     #expect(queue.tracks == [a, c, b] && queue.current == a)
     queue.append([d])
     #expect(queue.tracks == [a, c, b, d] && queue.index == 0)
+}
+
+/// #1309: a song every channel turned down only for their request budgets waits for them instead of being skipped.
+/// #1281: with the whole queue repeating, the last song's failure moves on to the first.
+@Test func budgetWaitsAndRepeatAllAfterFailures() {
+    let now = Date()
+    #expect(MusicQueue.budgetWait(after: .rateLimited(until: now.addingTimeInterval(10)), retries: 0, now: now) == 11)
+    #expect(MusicQueue.budgetWait(after: .rateLimited(until: nil), retries: 1, now: now) == 31)
+    #expect(MusicQueue.budgetWait(after: .rateLimited(until: now.addingTimeInterval(-5)), retries: 0, now: now) == 2)
+    // Too long to hold the queue for, asked twice already, or not a budget at all: the usual skip.
+    #expect(MusicQueue.budgetWait(after: .rateLimited(until: now.addingTimeInterval(600)), retries: 0, now: now) == nil)
+    #expect(MusicQueue.budgetWait(after: .rateLimited(until: now.addingTimeInterval(10)), retries: 2, now: now) == nil)
+    #expect(MusicQueue.budgetWait(after: .timeout, retries: 0, now: now) == nil)
+    #expect(MusicQueue.budgetWait(after: .noChannels, retries: 0, now: now) == nil)
+
+    let tracks = (1...3).map { song("S\($0)", "\($0)") }
+    let last = MusicQueue(tracks: tracks, start: 2)
+    #expect(!last.skipsAfterFailure(.noResource, consecutive: 1, channelsAsked: true))
+    #expect(last.skipsAfterFailure(.noResource, consecutive: 1, channelsAsked: true, wraps: true))
+    #expect(!last.skipsAfterFailure(.noResource, consecutive: 3, channelsAsked: true, wraps: true))
+    #expect(!MusicQueue(tracks: [tracks[0]]).skipsAfterFailure(consecutive: 0, wraps: true))
+    #expect(MusicRepeatMode.off.next == .all && MusicRepeatMode.all.next == .one && MusicRepeatMode.one.next == .off)
 }

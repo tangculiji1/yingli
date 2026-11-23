@@ -56,6 +56,26 @@ struct SettingsRow<Trailing: View>: View {
     }
 }
 
+#if os(tvOS)
+/// A row that is only read, as on the licences page and How Points Work. A tvOS page needs something the remote can focus:
+/// with nothing focused, the arrows do nothing and Back leaves the app. So each row is a button that does nothing, showing
+/// focus as a glass row does but in a rounded rectangle (a capsule around a tall paragraph looked odd) and with no
+/// pressed state, so it doesn't look like something to press.
+struct TVReadingRowStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View { Plate(configuration: configuration) }
+    private struct Plate: View {
+        let configuration: ButtonStyleConfiguration
+        @Environment(\.isFocused) private var focused
+        var body: some View {
+            configuration.label
+                .padding(.horizontal, 28).padding(.vertical, 14)
+                .glassSurface(focused ? .regular.tint(.white.opacity(0.12)) : .identity, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+                .animation(.easeOut(duration: 0.15), value: focused)
+        }
+    }
+}
+#endif
+
 extension SettingsRow where Trailing == EmptyView {
     init(symbol: String, tint: Color = .gray, title: String, subtitle: String? = nil) {
         self.init(symbol: symbol, tint: tint, title: title, subtitle: subtitle) { EmptyView() }
@@ -281,6 +301,8 @@ struct LXSourcePage: View {
     @Environment(Store.self) private var store
     @Environment(\.dismiss) private var dismiss
     @State private var confirmsRemoval = false
+    /// Until when this source is asked after the others, having failed or timed out lately (#1374).
+    @State private var coolingUntil: Date?
     var body: some View {
         let current = store.lxSources.first { $0.id == source.id } ?? source
         let enabled = Binding(get: { current.enabled }, set: { LXSourceLibrary.shared.setEnabled(source.id, $0) })
@@ -288,13 +310,22 @@ struct LXSourcePage: View {
             .confirmationDialog(L10n.text("Remove “%@”", current.info.name), isPresented: $confirmsRemoval) {
                 Button(L10n.text("Remove"), role: .destructive) { LXSourceLibrary.shared.remove(source.id); dismiss() }
             }
+            .task { coolingUntil = await MusicHealth.shared.coolingUntil(prefix: LXMusicProvider.upstream(source) + "|") }
+    }
+
+    /// What the source's row says: its version and catalogs, and whether it has stopped answering lately.
+    private func detail(_ current: LXSource) -> String {
+        let base = MusicLXSourcesModel.detail(current)
+        guard let coolingUntil else { return base }
+        let status = L10n.text("Not answering lately, so other sources are asked first until %@.", coolingUntil.formatted(date: .omitted, time: .shortened))
+        return base.isEmpty ? status : base + "\n" + status
     }
 
     @ViewBuilder private func page(_ current: LXSource, enabled: Binding<Bool>) -> some View {
         #if os(tvOS)
         TVSettingsSubpage(symbol: "music.note", title: current.info.name, subtitle: current.origin?.absoluteString) {
             TVSettingsSection(title: L10n.text("LX Music Sources"), footer: MusicLXSourcesModel.note) {
-                TVSettingsToggle(title: L10n.text("Use This Source"), detail: MusicLXSourcesModel.detail(current), isOn: enabled)
+                TVSettingsToggle(title: L10n.text("Use This Source"), detail: detail(current), isOn: enabled)
             }
             TVSettingsSection {
                 TVSettingsAction(title: L10n.text("Remove Source"), destructive: true) { confirmsRemoval = true }
@@ -308,7 +339,7 @@ struct LXSourcePage: View {
                 }
                 .settingsSwitch()
             } footer: {
-                Text(MusicLXSourcesModel.detail(current))
+                Text(detail(current))
             }
             if let origin = current.origin {
                 Section {
@@ -488,6 +519,10 @@ extension View {
 private enum SettingsNote {
     static var playbackInfo: String { L10n.text("Shows the video's format, resolution, frame rate and bitrate in a corner of the player.") }
     static var danmaku: String { L10n.text("Bilibili's bullet comments, drawn over the video. You can also switch them in the player.") }
+    /// Where a title's intro and outro times are set: in the player, not here (#1284, #1488).
+    static var introOutro: String {
+        L10n.text("Each series and audiobook keeps its own times. While one plays, choose Skip intro / outro in the player's settings menu, or in an audiobook's More menu.")
+    }
     static var tmdb: String {
         L10n.text("Shows cast, artwork and episode details from TMDB on video pages. Sends the video's title, its details from the source and the source's name to Yingxia's lookup service, never your accounts or subscription addresses.")
     }
@@ -530,6 +565,7 @@ struct FormSettingsView: View {
     @AppStorage(BilibiliCastController.key) private var receivesCasts = true
     @AppStorage(PlayOnController.key) private var receivesPlayOn = true
     @AppStorage(PlaybackInfo.key) private var showsPlaybackInfo = false
+    @State private var skipsIntros = false
     /// The language picked here, "" for the system's.
     @State private var language = MacLanguage.launched
     #endif
@@ -569,6 +605,9 @@ struct FormSettingsView: View {
         ScrollViewReader { proxy in
         Form { Group {
             heroSection
+
+            // Who is signed in: their feedback points, and Pro.
+            Section { AccountSettingsRow() }
 
             // Right under the app, so a problem or an idea is never more than one click away.
             #if os(iOS)
@@ -765,13 +804,21 @@ struct FormSettingsView: View {
             }
 
             Section {
-                Toggle(isOn: $syncsWithICloud) {
-                    FormLabel(symbol: "icloud.fill", tint: .blue, title: L10n.text("iCloud Sync"))
+                FormLink(symbol: "person.2.fill", tint: .teal, title: L10n.text("Profiles"), value: store.profile.title) { ProfilesView() }
+            }
+            .id("settings.profiles")
+
+            // Only the main profile's library syncs (#1456).
+            if store.profile.isMain {
+                Section {
+                    Toggle(isOn: $syncsWithICloud) {
+                        FormLabel(symbol: "icloud.fill", tint: .blue, title: L10n.text("iCloud Sync"))
+                    }
+                    .settingsSwitch()
+                    .onChange(of: syncsWithICloud) { _, on in store.cloudSync?.setEnabled(on) }
+                } footer: {
+                    Text(SettingsNote.iCloud)
                 }
-                .settingsSwitch()
-                .onChange(of: syncsWithICloud) { _, on in store.cloudSync?.setEnabled(on) }
-            } footer: {
-                Text(SettingsNote.iCloud)
             }
 
             #if os(iOS)
@@ -863,6 +910,13 @@ struct FormSettingsView: View {
                     FormLabel(symbol: "info.circle.fill", tint: .blue, title: L10n.text("Show Video Info"), subtitle: SettingsNote.playbackInfo)
                 }
                 .settingsSwitch()
+                // Where people look for it first (#1488): the switch, and where each title's times are set.
+                Toggle(isOn: $skipsIntros) {
+                    FormLabel(symbol: "arrow.right.to.line", tint: .mint, title: L10n.text("Automatically skip intro and outro"), subtitle: SettingsNote.introOutro)
+                }
+                .settingsSwitch()
+                .onAppear { skipsIntros = EpisodeSkipSettings.isAutomatic(defaults: store.playbackDefaults) }
+                .onChange(of: skipsIntros) { _, on in EpisodeSkipSettings.setAutomatic(on, defaults: store.playbackDefaults) }
                 FormLink(symbol: "captions.bubble.fill", tint: .orange, title: L10n.text("Subtitle Style")) { SubtitleStyleView() }
                 FormLink(symbol: "text.magnifyingglass", tint: .orange, title: L10n.text("Subtitle Sources")) { SubtitleSourcesView() }
                 FormLink(symbol: "play.fill", tint: Brand.indigo, title: L10n.text("Play a URL")) { PlayURLView() }
@@ -1210,14 +1264,28 @@ struct PlaybackSettingsView: View {
     @AppStorage(AdSkip.key) private var skipsAds = true
     @AppStorage(WatchPage.autoPlayKey) private var autoPlays = true
     @AppStorage(WatchPage.fullScreenKey) private var startsFullScreen = false
+    /// The profile's switch for intros and outros, kept with its times rather than in the app's own defaults.
+    @State private var skipsIntros = false
     var body: some View {
         SettingsPage(title: L10n.text("Playback"), symbol: "slider.horizontal.below.rectangle") {
+            // Where people look for it first (#1488): the switch, and where each title's times are set.
+            SettingsGroup(footer: SettingsNote.introOutro) {
+                Toggle(isOn: $skipsIntros) {
+                    FormLabel(symbol: "arrow.right.to.line", tint: .mint, title: L10n.text("Automatically skip intro and outro"))
+                }
+                .settingsSwitch()
+                .accessibilityIdentifier("settings.skipIntros")
+                .onAppear { skipsIntros = EpisodeSkipSettings.isAutomatic(defaults: store.playbackDefaults) }
+                .onChange(of: skipsIntros) { _, on in EpisodeSkipSettings.setAutomatic(on, defaults: store.playbackDefaults) }
+            }
             // Few groups with short rows: one card per switch, each with its own long note, read as a stack of
             // fragments, and a long title pushed the switch's row to two lines.
             SettingsGroup(title: L10n.text("Gestures"), footer: L10n.text("Touch and hold the video to play at this speed. Slide sideways to change it, or slide down to keep it after you let go.")
                           + " " + L10n.text("Slide up or down on the left of the video to change the brightness, or on the right to change the volume.")
                           + " " + L10n.text("Double-tap the left or right of the video to skip forward or back. Turn this off and a double tap plays or pauses instead.")) {
+                // Off for those who'd rather a hold did nothing (#1149).
                 Picker(selection: $holdSpeed) {
+                    Text(L10n.text("Off")).tag(SpeedBoost.off)
                     ForEach(SpeedBoost.startRates, id: \.self) { Text($0.formatted(.number.precision(.fractionLength(0...2))) + "×").tag($0) }
                 } label: {
                     FormLabel(symbol: "forward.fill", tint: .orange, title: L10n.text("Touch and Hold Speed"))
@@ -1637,7 +1705,7 @@ struct LicensesView: View {
                         Text(paragraph.replacingOccurrences(of: "\n", with: " ")).font(.system(size: 24)).foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .buttonStyle(ParagraphStyle())
+                    .buttonStyle(TVReadingRowStyle())
                 }
             }
         }
@@ -1656,22 +1724,6 @@ struct LicensesView: View {
         }
         #endif
     }
-    #if os(tvOS)
-    /// A glass row's focus, in a rounded rectangle: a capsule around a tall paragraph looked odd.
-    private struct ParagraphStyle: ButtonStyle {
-        func makeBody(configuration: Configuration) -> some View { Plate(configuration: configuration) }
-        private struct Plate: View {
-            let configuration: ButtonStyleConfiguration
-            @Environment(\.isFocused) private var focused
-            var body: some View {
-                configuration.label
-                    .padding(.horizontal, 28).padding(.vertical, 14)
-                    .glassSurface(focused ? .regular.tint(.white.opacity(0.12)) : .identity, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
-                    .animation(.easeOut(duration: 0.15), value: focused)
-            }
-        }
-    }
-    #endif
 }
 
 struct DiagnosticsView: View {
@@ -1692,9 +1744,12 @@ struct DiagnosticsView: View {
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
+            // One ViewThatFits, never one inside another: the nested pair made iOS 27 lay the page out
+            // forever, so opening it froze the app (#1370, #1378).
             ViewThatFits(in: .horizontal) {
-                HStack(alignment: .top) { heading; Spacer(minLength: 24); actions }
-                VStack(alignment: .leading, spacing: 16) { heading; actions }
+                HStack(alignment: .top) { heading; Spacer(minLength: 24); actionRow }
+                VStack(alignment: .leading, spacing: 16) { heading; actionRow }
+                VStack(alignment: .leading, spacing: 16) { heading; VStack(alignment: .leading, spacing: 8) { actionButtons }.appControlSize(.regular) }
             }
             VStack(spacing: 0) {
                 filters.padding(16)
@@ -1741,11 +1796,8 @@ struct DiagnosticsView: View {
             Text(L10n.text("Inspect plugin requests and errors.")).font(.subheadline).foregroundStyle(.secondary)
         }
     }
-    private var actions: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 8) { actionButtons }
-            VStack(alignment: .leading, spacing: 8) { actionButtons }
-        }.appControlSize(.regular)
+    private var actionRow: some View {
+        HStack(spacing: 8) { actionButtons }.appControlSize(.regular)
     }
     @ViewBuilder private var actionButtons: some View {
             Button { live.toggle() } label: {
@@ -2025,12 +2077,14 @@ struct TVSettingsView: View {
     @AppStorage(ErrorReports.key) private var sendsErrorReports = true
     @AppStorage(TMDBMatch.key) private var looksUpTMDB = true
     @AppStorage(CloudSync.enabledKey) private var syncsWithICloud = true
+    @State private var skipsIntros = false
 
     var body: some View {
         TVSettingsLayout {
             TVSettingsHero()
         } list: {
             if !updates.available.isEmpty { updateSection }
+            TVSettingsSection { AccountSettingsRow() }
             // First in the list, beside the app: a problem or an idea is one press away.
             TVSettingsSection {
                 TVSettingsLink(title: L10n.text("Send Feedback")) { FeedbackView() }
@@ -2060,9 +2114,15 @@ struct TVSettingsView: View {
                 }
                 TVSettingsLink(title: L10n.text("Cloud Drive Accounts"), value: cloudSummary) { CloudDriveView() }
             }
-            TVSettingsSection(footer: L10n.text("Keeps favorites, Continue Watching, subscriptions, and the sources you pinned, hid or ordered the same on your devices signed in to the same iCloud account. Accounts, passwords and downloads stay on each device.")) {
-                TVSettingsToggle(title: L10n.text("iCloud Sync"), isOn: $syncsWithICloud)
-                    .onChange(of: syncsWithICloud) { _, on in store.cloudSync?.setEnabled(on) }
+            TVSettingsSection {
+                TVSettingsLink(title: L10n.text("Profiles"), value: store.profile.title) { ProfilesView() }
+            }
+            // Only the main profile's library syncs (#1456).
+            if store.profile.isMain {
+                TVSettingsSection(footer: L10n.text("Keeps favorites, Continue Watching, subscriptions, and the sources you pinned, hid or ordered the same on your devices signed in to the same iCloud account. Accounts, passwords and downloads stay on each device.")) {
+                    TVSettingsToggle(title: L10n.text("iCloud Sync"), isOn: $syncsWithICloud)
+                        .onChange(of: syncsWithICloud) { _, on in store.cloudSync?.setEnabled(on) }
+                }
             }
             TVSettingsSection {
                 TVSettingsLink(title: L10n.text("Watch Now")) { WatchNowSettingsView() }
@@ -2083,6 +2143,12 @@ struct TVSettingsView: View {
                         if on { PlayOnController.shared.start(store) } else { PlayOnController.shared.stop() }
                     }
                 TVSettingsLink(title: L10n.text("Play a URL")) { TVPlayURLPage() }
+            }
+            // Where people look for it first (#1284): the switch, and where each title's times are set.
+            TVSettingsSection(footer: L10n.text("Each series and audiobook keeps its own times. While one plays, open the menu in the playback controls, choose Skip intro / outro, and pick Intro Ends Here when the intro ends.")) {
+                TVSettingsToggle(title: L10n.text("Automatically skip intro and outro"), isOn: $skipsIntros)
+                    .onAppear { skipsIntros = EpisodeSkipSettings.isAutomatic(defaults: store.playbackDefaults) }
+                    .onChange(of: skipsIntros) { _, on in EpisodeSkipSettings.setAutomatic(on, defaults: store.playbackDefaults) }
             }
             TVSettingsSection(footer: L10n.text("Shows the video's format, resolution, frame rate and bitrate in a corner of the player.")) {
                 TVSettingsLink(title: L10n.text("Subtitle Style")) { SubtitleStyleView() }
@@ -2692,3 +2758,77 @@ enum MacLanguage {
     }
 }
 #endif
+
+// MARK: Profiles (#1456)
+
+/// Settings › Profiles: one library per person on a shared device. Choosing a profile opens it at once, on Watch Now;
+/// its menu (a long press, or a right click on the Mac) renames or deletes it.
+struct ProfilesView: View {
+    @Environment(Store.self) private var store
+    @State private var profiles = Profiles.shared
+    @State private var adding = false
+    @State private var renaming: Profile?
+    @State private var removing: Profile?
+    @State private var name = ""
+
+    var body: some View {
+        SettingsPage(title: L10n.text("Profiles"), symbol: "person.2") {
+            SettingsGroup(footer: L10n.text("Each profile has its own subscriptions, favorites, Continue Watching, followed shows and search history. Only the main profile syncs with iCloud; downloads, accounts and settings are shared.")) {
+                ForEach(profiles.all) { profile in
+                    row(profile)
+                        .contextMenu {
+                            Button { name = profile.name; renaming = profile } label: { Label(L10n.text("Rename Profile"), systemImage: "pencil") }
+                            if !profile.isMain {
+                                Button(role: .destructive) { removing = profile } label: { Label(L10n.text("Delete Profile"), systemImage: "trash") }
+                                    .disabled(profile.id == store.profile.id)
+                            }
+                        }
+                }
+            }
+            SettingsGroup {
+                SettingsActionRow(title: L10n.text("Add Profile")) { name = ""; adding = true }
+            }
+        }
+        .alert(L10n.text("Add Profile"), isPresented: $adding) {
+            TextField(L10n.text("Name"), text: $name)
+            Button(L10n.text("Cancel"), role: .cancel) {}
+            Button(L10n.text("Add")) { profiles.add(named: name) }
+        }
+        .alert(L10n.text("Rename Profile"), isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
+            TextField(L10n.text("Name"), text: $name)
+            Button(L10n.text("Cancel"), role: .cancel) {}
+            Button(L10n.text("Save")) { if let renaming { profiles.rename(renaming, to: name); store.profileRenamed() } }
+        }
+        .alert(L10n.text("Delete “%@”?", removing?.title ?? ""), isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } })) {
+            Button(L10n.text("Cancel"), role: .cancel) {}
+            Button(L10n.text("Delete Profile"), role: .destructive) { if let removing { profiles.remove(removing) } }
+        } message: {
+            Text(L10n.text("Its subscriptions, favorites, Continue Watching and search history are deleted from this device."))
+        }
+    }
+
+    /// Selecting a row opens that profile; the open one has the checkmark.
+    private func row(_ profile: Profile) -> some View {
+        let open = profile.id == store.profile.id
+        return Button { store.openProfile(profile) } label: {
+            #if os(tvOS)
+            TVSettingsRowLabel(title: profile.title) {
+                Image(systemName: "checkmark").font(.system(size: 26, weight: .semibold)).opacity(open ? 1 : 0)
+            }
+            #else
+            LabeledContent {
+                if open { Image(systemName: "checkmark").fontWeight(.semibold).foregroundStyle(systemAccent) }
+            } label: {
+                FormLabel(symbol: profile.isMain ? "person.crop.circle.fill" : "person.crop.circle", tint: profile.isMain ? .blue : .teal, title: profile.title)
+            }
+            #endif
+        }
+        #if os(tvOS)
+        .glassRow()
+        #else
+        .formRowButton()
+        #endif
+        .disabled(!open && !store.switchesProfiles)
+        .accessibilityAddTraits(open ? .isSelected : [])
+    }
+}

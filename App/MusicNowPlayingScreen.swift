@@ -16,6 +16,7 @@ struct MusicNowPlayingScreen: View {
     @State private var panel: Panel?
     @State private var tint = Color(white: 0.24)
     @State private var showsChannels = false
+    @State private var showsSkip = false
     @Namespace private var cover
 
     var body: some View {
@@ -48,11 +49,13 @@ struct MusicNowPlayingScreen: View {
         .padding(.horizontal, 28).padding(.top, 30).padding(.bottom, 6)
         .foregroundStyle(.white)
         .tint(.white)
-        .background { sheetBackdrop.ignoresSafeArea() }
+        .overlay(alignment: .top) { if Self.coversScreen { grabber } }
+        .background { backdrop.ignoresSafeArea() }
         .environment(\.colorScheme, .dark)
+        // Full screen, the status bar is over this backdrop, so it is drawn light.
+        .preferredColorScheme(Self.coversScreen ? .dark : nil)
         .presentationDragIndicator(.visible)
-        .presentationBackground { if Self.shapesOwnSheet { Color.clear } else { backdrop } }
-        .presentationCornerRadius(Self.shapesOwnSheet ? 0 : nil)
+        .presentationBackground { backdrop }
         .task(id: music.track?.artwork) {
             guard let url = music.track?.artwork, let color = await PosterPalette.average(url) else { return }
             withAnimation(.easeInOut(duration: 0.6)) { tint = color }
@@ -72,25 +75,24 @@ struct MusicNowPlayingScreen: View {
         }
         #endif
         .sheet(isPresented: $showsChannels) { MusicChannelsView() }
+        .sheet(isPresented: $showsSkip) { EpisodeSkipSettingsView(session: music, book: true).preferredColorScheme(.dark) }
     }
 
     private var backdrop: some View {
         LinearGradient(colors: [tint.blend(with: .black, by: 0.2), tint.blend(with: .black, by: 0.62)], startPoint: .top, endPoint: .bottom)
     }
 
-    /// On an iPhone, iOS 26 and later round the bottom corners of a full-height sheet too, not quite as the display rounds
-    /// its own, so the page behind showed as a light edge around the bottom of this dark sheet (#797). There the sheet
-    /// has no corners or background of its own, and the backdrop rounds the top ones as the system did.
-    private static let shapesOwnSheet: Bool = {
+    /// An iPhone on iOS 26 and later shows Now Playing over the whole screen, as Music does (`musicNowPlaying`).
+    /// As a sheet there, the page behind showed around its corners: a light edge at the bottom ones (#797), and light
+    /// wedges beside the top ones in the light appearance (#1153).
+    static let coversScreen: Bool = {
         if #available(iOS 26, *) { UIDevice.current.userInterfaceIdiom == .phone } else { false }
     }()
+    static let zoomSource = "music.nowPlaying"
 
-    @ViewBuilder private var sheetBackdrop: some View {
-        if Self.shapesOwnSheet {
-            backdrop.clipShape(.rect(topLeadingRadius: 38, topTrailingRadius: 38, style: .continuous))
-        } else {
-            backdrop
-        }
+    /// The sheet's drag indicator, drawn where the full-screen form has none: a swipe down still closes it.
+    private var grabber: some View {
+        Capsule().fill(.white.opacity(0.35)).frame(width: 36, height: 5).padding(.top, 8).accessibilityHidden(true)
     }
 
     /// The cover, drawn once over the page at the place laid out for it: large above the title, or small beside it
@@ -128,6 +130,8 @@ struct MusicNowPlayingScreen: View {
                 } else {
                     Button { showsChannels = true } label: { Label(L10n.text("Channels"), systemImage: "antenna.radiowaves.left.and.right") }
                 }
+                // A book's intro and outro, for all its chapters (#1486); never a song's.
+                if music.canSkip { SkipTimesMenuButton(session: music) { showsSkip = true } }
                 if let track = music.track { MusicDownloadMenuItems(tracks: [track]) }
                 SleepTimerMenu(item: music.sleepItem)
                 Button(role: .destructive) { music.stop() } label: { Label(L10n.text("Stop"), systemImage: "xmark") }
@@ -189,7 +193,7 @@ struct MusicNowPlayingScreen: View {
                 }
             }
             Spacer()
-            control("forward.fill", size: 30, label: "Next") { music.next() }.disabled(music.queue?.hasNext != true)
+            control("forward.fill", size: 30, label: "Next") { music.next() }.disabled(!music.canAdvance)
             Spacer()
         }
         .frame(height: 84)
@@ -310,5 +314,37 @@ struct MusicRoutePicker: UIViewRepresentable {
         return view
     }
     func updateUIView(_ view: AVRoutePickerView, context: Context) {}
+}
+
+extension EnvironmentValues {
+    /// Where Now Playing zooms out of and back into on an iPhone: the mini player (`musicNowPlaying`).
+    @Entry var nowPlayingZoom: Namespace.ID? = nil
+}
+
+extension View {
+    /// Now Playing over the app. An iPhone on iOS 26 and later shows it full screen, as Music does: it zooms out of the
+    /// mini player and a swipe down puts it back. Elsewhere it is a sheet, which swiping down closes too.
+    @ViewBuilder func musicNowPlaying(isPresented: Binding<Bool>, zoom: Namespace.ID) -> some View {
+        if #available(iOS 26, *), MusicNowPlayingScreen.coversScreen {
+            fullScreenCover(isPresented: isPresented) {
+                MusicNowPlayingScreen().navigationTransition(.zoom(sourceID: MusicNowPlayingScreen.zoomSource, in: zoom))
+            }
+            .environment(\.nowPlayingZoom, zoom)
+        } else {
+            sheet(isPresented: isPresented) { MusicNowPlayingScreen() }
+        }
+    }
+}
+
+/// Marks the mini player as the place Now Playing zooms from, where it is shown full screen.
+struct NowPlayingZoomSource: ViewModifier {
+    @Environment(\.nowPlayingZoom) private var zoom
+    func body(content: Content) -> some View {
+        if #available(iOS 18, *), let zoom {
+            content.matchedTransitionSource(id: MusicNowPlayingScreen.zoomSource, in: zoom)
+        } else {
+            content
+        }
+    }
 }
 #endif

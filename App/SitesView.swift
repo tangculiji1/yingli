@@ -1324,6 +1324,9 @@ struct SiteView: View {
                                         Button { store.searchVideos(video.name) } label: { PosterCard(video: video) }.cardButton()
                                     } else if landscape {
                                         RouteLink { CatalogDestination(video: video, client: client) } label: { BilibiliVideoTile(video: video, width: nil) }.cardButton()
+                                    } else if site.isCloudFiles, let file = CloudFilesSource.file(of: video) {
+                                        // A drive's folders and videos with the posters their names find (#880).
+                                        CloudPosterLink(file: file, client: client, parent: folder?.name) { CatalogDestination(video: video, client: client) }
                                     } else {
                                         RouteLink { CatalogDestination(video: video, client: client) } label: { PosterCard(video: video) }.cardButton()
                                     }
@@ -2162,6 +2165,8 @@ struct VideoDetailView: View {
     #if !os(tvOS)
     /// The episode row's All sheet, and where the row is scrolled to.
     @State private var showsAllEpisodes = false
+    /// The page of a long series the All sheet shows (#1464); nil for the one with the episode being watched.
+    @State private var episodePage: Int?
     @State private var episodeScroll: Episode.ID?
     #endif
     #if os(iOS)
@@ -3163,9 +3168,10 @@ struct VideoDetailView: View {
     private var watchHistory: PlaybackHistoryEntry? {
         store.playbackHistory.entries.first { watchScopes.contains($0.context.id) }
     }
-    /// Where an episode stopped last time, when it is the one watched last; any other starts at 0.
+    /// Where an episode stopped last time, when it is the one watched last, on its line or another (#1300); any other
+    /// starts at 0.
     private func resumePosition(for episode: Episode) -> Double? {
-        watchHistory?.resumePosition(for: episode)
+        watchHistory?.resumePosition(for: episode, among: currentVideo().episodes)
     }
     /// The line of the episode playing, else of the one watched last, while the details still have it: the page opens
     /// on that line so the episode shows in its list, not on the first line (#362).
@@ -3497,7 +3503,7 @@ extension VideoDetailView {
                                 SeasonsButton(video: video, client: client, capsule: true)
                             }
                             if items.count > (compact ? 5 : 2) {
-                                Button { showsAllEpisodes = true } label: {
+                                Button { episodePage = nil; showsAllEpisodes = true } label: {
                                     // On one line, like Seasons beside it: it wrapped to 全/部 beside a line's name (#1260).
                                     HStack(spacing: 3) { Text(L10n.text("All")); Image(systemName: "chevron.right").font(.caption.weight(.semibold)) }
                                         .font(.subheadline).foregroundStyle(.secondary)
@@ -3590,7 +3596,7 @@ extension VideoDetailView {
     @ViewBuilder private var watchLines: some View {
         if flags.count > 1 {
             SourceStrip(items: flags.map { .init(id: $0, name: $0.isEmpty ? L10n.text("Play") : $0) }, selection: activeFlag) { flag in
-                selectedFlag = flag
+                selectedFlag = flag; episodePage = nil
                 guard watchChannel != nil, let episodes = detail?.episodes else { return }
                 let playing = episodes.first { $0.id == currentEpisodeID }
                 let same = episodes.first { $0.flag == flag && $0.name == playing?.name } ?? episodes.first { $0.flag == flag }
@@ -3699,20 +3705,32 @@ extension VideoDetailView {
         let items = activeEpisodes
         let tile = compactTileWidth(items)
         let stills = watchStills(items)
+        // A long series in pages of 50 or 100, opening at the one with the episode being watched (#1464).
+        let pages = EpisodePages.pages(count: items.count)
+        let current = currentEpisodeID.flatMap { id in items.firstIndex { $0.id == id } }
+        let page = pages.isEmpty ? nil : min(episodePage ?? EpisodePages.page(holding: current, in: pages), pages.count - 1)
+        let shown = page.map { Array(items[pages[$0]]) } ?? items
         return NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     watchLines
+                    if let page {
+                        EpisodePageTabs(pages: pages, selection: page, reversed: reversesEpisodes) { episodePage = $0 }
+                            .contentMargins(.horizontal, 16, for: .scrollContent).scrollClipDisabled()
+                            .padding(.horizontal, -16)
+                    }
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: stills.isEmpty ? tile ?? 150 : 160), spacing: stills.isEmpty ? 8 : 12, alignment: .top)],
                               spacing: stills.isEmpty ? 8 : 14) {
-                        ForEach(shownOrder(items)) { watchEpisodeCard($0, tile: tile, fill: true, info: stills[$0.id]) { showsAllEpisodes = false } }
+                        ForEach(shownOrder(shown)) { watchEpisodeCard($0, tile: tile, fill: true, info: stills[$0.id]) { showsAllEpisodes = false } }
                     }
                     .scrollTargetLayout()
                 }
                 .padding(16)
             }
             // At the episode playing or watched last, as the row on the page (#1173): a long series opened at episode 1.
+            // Another page opens at its top.
             .modifier(OpensAtEpisode(currentEpisodeID))
+            .id(page ?? -1)
             .navigationTitle(L10n.text("Episodes"))
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
@@ -3727,6 +3745,7 @@ extension VideoDetailView {
             }
         }
         .environment(\.glassControls, true)
+        .modifier(AppColorScheme(scheme: embed?.appColorScheme))
         #if os(iOS)
         .presentationDetents([.medium, .large])
         #else
@@ -3909,13 +3928,29 @@ struct DetailEmbed {
     let catalogFallback: () -> AnyView
     /// Change Source in the episodes' heading.
     let changeSource: () -> Void
+    /// The app's light or dark look. The page draws in its art's own (white text on dark art), and its sheets
+    /// inherited that while their background follows the app: All Episodes went white on white at full height.
+    let appColorScheme: ColorScheme
 }
 
 #if !os(tvOS)
+/// A sheet from a page that forced its own light or dark look gets the app's back (`DetailEmbed.appColorScheme`).
+/// `Color.primary`, not `.primary`: that is the inherited style's first level, the page's white.
+private struct AppColorScheme: ViewModifier {
+    let scheme: ColorScheme?
+    func body(content: Content) -> some View {
+        if let scheme {
+            content.foregroundStyle(Color.primary).environment(\.colorScheme, scheme).preferredColorScheme(scheme)
+        } else {
+            content
+        }
+    }
+}
+
 /// Opens a scroll view of episodes at one of them (#1173). `scrollTo` from the sheet's onAppear, or its first task,
 /// came before the sheet had laid out its lazy grid and left it at the top. The position is this modifier's own
 /// state, so scrolling redraws only it, not the page behind the sheet.
-private struct OpensAtEpisode: ViewModifier {
+struct OpensAtEpisode: ViewModifier {
     @State private var position: Episode.ID?
     init(_ episode: Episode.ID?) { _position = State(initialValue: episode) }
     func body(content: Content) -> some View { content.scrollPosition(id: $position, anchor: .center) }

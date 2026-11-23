@@ -19,6 +19,26 @@
       "category": "entertainment",
       "versions": [
         {
+          "version": "1.8.28",
+          "buildVersion": "66",
+          "date": "2026-11-22",
+          "localizedDescription": "• 画中画里继续看\n• 播放更顺，手机更凉\n• 跳过片头片尾，一找就到\n• 家里每个人都有自己的用户\n• 投屏到电视\n• 网盘影片以海报显示\n• 小说随心读，还能听书\n• 弹幕随你调\n• 漫画双页，音乐不断\n• 其他修复\n\n• Keep watching in Picture in Picture\n• Smoother, cooler playback\n• Skip intro and outro, easy to find\n• Profiles for everyone at home\n• Cast to your TV\n• Posters for your drive's films\n• Novels your way, and audiobooks\n• Danmaku your way\n• Manga spreads, music that keeps going\n• Other fixes",
+          "downloadURL": "https://download.getmegaportal.com/yingxia/1.8.28/Yingxia-1.8.28-ios.ipa",
+          "size": 185712074,
+          "sha256": "3fef22ae1bdcb1ba1209c8aa5d6f4c11dada494775647e3759304807667f3782",
+          "minOSVersion": "17.0"
+        },
+        {
+          "version": "1.8.27",
+          "buildVersion": "65",
+          "date": "2026-11-21",
+          "localizedDescription": "• 映匣账号\n• 帮映匣变好，赚积分\n• 视频里的广告更少了\n• “正在播放”全屏显示\n• 其他修复\n\n• A Yingxia account\n• Points for helping Yingxia\n• Fewer ads in videos\n• Now Playing fills the screen\n• Other fixes",
+          "downloadURL": "https://download.getmegaportal.com/yingxia/1.8.27/Yingxia-1.8.27-ios.ipa",
+          "size": 185065395,
+          "sha256": "3db7ec3168f89e87d9377f3fde59a0c3048ca8a2a61c2f4ade835980141841f5",
+          "minOSVersion": "17.0"
+        },
+        {
           "version": "1.8.26",
           "buildVersion": "64",
           "date": "2026-11-20",
@@ -47,33 +67,13 @@
           "size": 184383585,
           "sha256": "40280296b7f65fd0756dca8f876e7cfb5a8ff9978d6dfda775a69e63466d91ff",
           "minOSVersion": "17.0"
-        },
-        {
-          "version": "1.8.23",
-          "buildVersion": "61",
-          "date": "2026-11-16",
-          "localizedDescription": "• 更多网盘\n• 飞牛 NAS 与媒体服务器\n• iPhone 和 iPad 播放器\n• 跳过片头片尾\n• 订阅与点播源\n• 小说：登录书源\n• 其他修复\n\n• More cloud drives\n• fnOS NAS and media servers\n• Player on iPhone and iPad\n• Intro and outro skipping\n• Subscriptions and sources\n• Novels: sign in to book sources\n• Other fixes",
-          "downloadURL": "https://download.getmegaportal.com/yingxia/1.8.23/Yingxia-1.8.23-ios.ipa",
-          "size": 178364180,
-          "sha256": "ba5c3cc0843746977c3739e59526ce5fd4f939d71281167ce5a54403a1244beb",
-          "minOSVersion": "17.0"
-        },
-        {
-          "version": "1.8.22",
-          "buildVersion": "60",
-          "date": "2026-11-15",
-          "localizedDescription": "• 配色主题\n• 全新应用图标，Apple TV 也能换\n• 更清爽的播放器\n• 云盘视频起播、跳转更快\n• 其他修复\n\n• Color themes\n• New app icons, on Apple TV too\n• A calmer player\n• Cloud drive videos start and seek faster\n• Other fixes",
-          "downloadURL": "https://download.getmegaportal.com/yingxia/1.8.22/Yingxia-1.8.22-ios.ipa",
-          "size": 178050981,
-          "sha256": "58cd71d52bfd9e83abbb7e57f6010d0dfc6f1e62de4923b115a3ebd4631b6fb6",
-          "minOSVersion": "17.0"
         }
       ],
       "appPermissions": {
         "entitlements": [],
         "privacy": {
           "NSLocalNetworkUsageDescription": "Connect to the local media and subscription services you configure, and find Yingxia on your other devices.",
-          "NSPhotoLibraryAddUsageDescription": "Saves a sign-in code to Photos, so the app on this phone can scan it."
+          "NSPhotoLibraryAddUsageDescription": "Adds frames you save from videos, and sign-in codes, to Photos."
         }
       }
     }
