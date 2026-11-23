@@ -1,0 +1,63 @@
+name: Sync upstream
+
+# Merges jo32/tvbox-silicon into this fork and pushes the result to a sync branch, so the
+# rebranded build can be built from it before main is touched.
+#
+# Conflicts are resolved in upstream's favour (`-X theirs`): every file this fork edits on disk
+# (project.yml, the Info plists, GlassKit) is restored from the scripts afterwards, and the
+# remaining local edits live in files upstream never touches (DocumentPicker, build-overrides,
+# the build workflow, the icon artwork).
+
+on:
+    workflow_dispatch:
+        inputs:
+            upstream_branch:
+                description: Upstream branch to merge
+                default: main
+            target_branch:
+                description: Branch to push the result to
+                default: sync-1.8.28
+
+permissions:
+    contents: write
+
+jobs:
+    sync:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: Merge upstream
+              run: |
+                  set -eux
+                  git config user.name "yingli-sync"
+                  git config user.email "yingli-sync@users.noreply.github.com"
+                  git tag -f pre-sync-backup HEAD
+                  git push -f origin refs/tags/pre-sync-backup
+                  git remote add upstream https://github.com/jo32/tvbox-silicon.git || true
+                  git fetch --no-tags upstream ${{ inputs.upstream_branch }}
+                  git merge -X theirs --no-ff FETCH_HEAD -m "Sync upstream ${{ inputs.upstream_branch }}"
+                  git log --oneline -3
+
+            - name: Restore the fork's name, bundle id and copyright
+              run: python3 Scripts/rebrand.py "影栗" "Yingli" "com.yingli.player"
+
+            - name: Commit the restored branding
+              run: |
+                  git add -A
+                  git diff --cached --quiet || git commit -m "Rebrand after the upstream sync"
+
+            - name: Report
+              run: |
+                  echo "=== bundle ids and names ==="
+                  grep -n -e "PRODUCT_BUNDLE_IDENTIFIER:" -e "CFBundleDisplayName:" -e "MARKETING_VERSION:" project.yml || true
+                  echo "=== files changed by the merge ==="
+                  git diff --stat HEAD^1 | tail -n 3
+                  echo "=== the files this fork adds are still here ==="
+                  ls -l App/DocumentPicker.swift Scripts/build-overrides.py .github/workflows/build-ios.yml
+                  grep -c "getmegaportal" Sources/TVCore/ReleaseFeed.swift || true
+
+            - name: Push the sync branch
+              run: git push -f origin HEAD:refs/heads/${{ inputs.target_branch }}
