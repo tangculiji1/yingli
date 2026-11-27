@@ -276,6 +276,78 @@ def arrange_settings_top() -> bool:
     return True
 
 
+REX_CASE = '    case sunset = "Sunset", rose = "Rose", crimson = "Crimson", orchid = "Orchid", graphite = "Graphite"\n'
+REX_CASE_NEW = (REX_CASE
+                + "    /// Rex: near-black pages and a violet highlight, the look of Rex - All Your Media.\n"
+                + '    case rex = "Rex"\n')
+REX_TITLE_ANCHOR = '        case .custom: L10n.text("Custom")\n'
+REX_PALETTE_ANCHOR = '        .orchid: hued(285, light: Color(red: 0.60, green: 0.26, blue: 0.80), dark: Color(red: 0.84, green: 0.63, blue: 1.0)),\n'
+REX_PALETTE = '''        // Rex: a near-black canvas, white panels on light pages, and a violet highlight.
+        .rex: ThemePalette(accentLight: rgb(0.42, 0.35, 0.95), accentDark: rgb(0.55, 0.46, 1.0),
+                           onAccentLight: .white, onAccentDark: .white,
+                           backdropLight: rgb(0.97, 0.97, 0.98), backdropDark: rgb(0.035, 0.035, 0.045),
+                           surfaceLight: .white, surfaceDark: rgb(0.095, 0.095, 0.115),
+                           tvSurface: rgb(0.07, 0.07, 0.085), tvRaised: rgb(0.13, 0.13, 0.155)),
+'''
+REX_STANDARD = "    static let standard = ColorTheme.classic\n"
+REX_RADIUS = "    static let radius: CGFloat = 12\n"
+
+CALENDAR_ANCHOR = '''        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button { searchShown = true } label: { Image(systemName: "text.magnifyingglass") }
+'''
+CALENDAR_NEW = '''        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button { openRoute?(Route { AnyView(WatchCalendarView()) }) } label: { Image(systemName: "calendar") }
+                    .accessibilityLabel(L10n.text("Following Calendar"))
+                    .accessibilityIdentifier("discover.watchCalendar")
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button { searchShown = true } label: { Image(systemName: "text.magnifyingglass") }
+'''
+
+
+def rex_look() -> list:
+    """A Rex theme (near-black pages, violet highlight) as the standard look, and Rex's rounder blocks."""
+    done = []
+    path = ROOT / "App/ColorThemes.swift"
+    text = path.read_text(encoding="utf-8")
+    before = text
+    if 'case rex = "Rex"' not in text:
+        for piece, name in ((REX_CASE, "the theme cases"), (REX_TITLE_ANCHOR, "the theme titles"),
+                            (REX_PALETTE_ANCHOR, "the palettes"), (REX_STANDARD, "the standard theme")):
+            if piece not in text:
+                raise SystemExit(f"App/ColorThemes.swift: could not find {name}")
+        text = text.replace(REX_CASE, REX_CASE_NEW, 1)
+        text = text.replace(REX_TITLE_ANCHOR, '        case .rex: L10n.text("Rex")\n' + REX_TITLE_ANCHOR, 1)
+        text = text.replace(REX_PALETTE_ANCHOR, REX_PALETTE_ANCHOR + REX_PALETTE, 1)
+        text = text.replace(REX_STANDARD, "    static let standard = ColorTheme.rex\n", 1)
+        done.append("theme")
+    if text != before:
+        path.write_text(text, encoding="utf-8")
+
+    path = ROOT / "App/SettingsView.swift"
+    text = path.read_text(encoding="utf-8")
+    if REX_RADIUS in text:
+        path.write_text(text.replace(REX_RADIUS, "    static let radius: CGFloat = 18\n", 1), encoding="utf-8")
+        done.append("radius")
+    return done
+
+
+def add_watch_calendar() -> bool:
+    """A calendar button in Discover's toolbar, opening the following calendar."""
+    if not (ROOT / "App/WatchCalendarView.swift").exists():
+        raise SystemExit("App/WatchCalendarView.swift is missing")
+    path = ROOT / "App/DiscoverView.swift"
+    text = path.read_text(encoding="utf-8")
+    if "discover.watchCalendar" in text:
+        return False
+    if CALENDAR_ANCHOR not in text:
+        raise SystemExit("App/DiscoverView.swift: could not find the toolbar")
+    path.write_text(text.replace(CALENDAR_ANCHOR, CALENDAR_NEW, 1), encoding="utf-8")
+    return True
+
+
 if __name__ == "__main__":
     print(f"renamed {rename_interface_strings()} strings")
     print("widened the file importer" if accept_any_file() else "file importer already widened")
@@ -287,3 +359,8 @@ if __name__ == "__main__":
     print(f"update checks off (channel {channel}, feed {feed})")
     print("Profiles and iCloud Sync now sit as cards under the name"
           if arrange_settings_top() else "top of Settings already arranged")
+    look = rex_look()
+    print(f"Rex look applied ({', '.join(look)})" if look else "Rex look already applied")
+    print("Discover's toolbar opens the following calendar"
+          if add_watch_calendar() else "Discover's toolbar already has the calendar")
+
