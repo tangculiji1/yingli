@@ -282,15 +282,26 @@ REX_CASE_NEW = (REX_CASE
                 + '    case rex = "Rex"\n')
 REX_TITLE_ANCHOR = '        case .custom: L10n.text("Custom")\n'
 REX_PALETTE_ANCHOR = '        .orchid: hued(285, light: Color(red: 0.60, green: 0.26, blue: 0.80), dark: Color(red: 0.84, green: 0.63, blue: 1.0)),\n'
-REX_PALETTE = '''        // Rex: a near-black canvas, white panels on light pages, and a violet highlight.
+REX_PALETTE_OLD = '''        // Rex: a near-black canvas, white panels on light pages, and a violet highlight.
         .rex: ThemePalette(accentLight: rgb(0.42, 0.35, 0.95), accentDark: rgb(0.55, 0.46, 1.0),
                            onAccentLight: .white, onAccentDark: .white,
                            backdropLight: rgb(0.97, 0.97, 0.98), backdropDark: rgb(0.035, 0.035, 0.045),
                            surfaceLight: .white, surfaceDark: rgb(0.095, 0.095, 0.115),
                            tvSurface: rgb(0.07, 0.07, 0.085), tvRaised: rgb(0.13, 0.13, 0.155)),
 '''
+REX_PALETTE = '''        // Rex: near-black pages, neutral charcoal panels, and a white pill for prominent actions.
+        .rex: ThemePalette(accentLight: rgb(0.06, 0.06, 0.07), accentDark: rgb(0.95, 0.95, 0.97),
+                           onAccentLight: .white, onAccentDark: rgb(0.04, 0.04, 0.05),
+                           backdropLight: rgb(0.985, 0.985, 0.99), backdropDark: rgb(0.030, 0.030, 0.035),
+                           surfaceLight: .white, surfaceDark: rgb(0.085, 0.085, 0.100),
+                           tvSurface: rgb(0.055, 0.055, 0.065), tvRaised: rgb(0.115, 0.115, 0.135)),
+'''
 REX_STANDARD = "    static let standard = ColorTheme.classic\n"
 REX_RADIUS = "    static let radius: CGFloat = 12\n"
+REX_STORED = "        current = defaults.string(forKey: Self.key).flatMap(ColorTheme.init(rawValue:)) ?? .standard\n"
+REX_TINT = "    func body(content: Content) -> some View { content.tint(Brand.accent).preferredColorScheme(ColorThemes.shared.customScheme) }\n"
+REX_MATERIAL = "                shape.fill(.ultraThinMaterial).overlay { if let tint = style.tint { shape.fill(tint) } }\n"
+REX_GLASS = "    public static let current = drawsGlass(model: ErrorReports.model)\n"
 
 CALENDAR_ANCHOR = '''        .toolbar {
             ToolbarItem(placement: .primaryAction) {
@@ -308,7 +319,7 @@ CALENDAR_NEW = '''        .toolbar {
 
 
 def rex_look() -> list:
-    """A Rex theme (near-black pages, violet highlight) as the standard look, and Rex's rounder blocks."""
+    """A Rex theme (near-black pages, white pills) as the standard look, and Rex's rounder blocks."""
     done = []
     path = ROOT / "App/ColorThemes.swift"
     text = path.read_text(encoding="utf-8")
@@ -323,6 +334,9 @@ def rex_look() -> list:
         text = text.replace(REX_PALETTE_ANCHOR, REX_PALETTE_ANCHOR + REX_PALETTE, 1)
         text = text.replace(REX_STANDARD, "    static let standard = ColorTheme.rex\n", 1)
         done.append("theme")
+    if REX_PALETTE_OLD in text:
+        text = text.replace(REX_PALETTE_OLD, REX_PALETTE, 1)
+        done.append("palette")
     if text != before:
         path.write_text(text, encoding="utf-8")
 
@@ -331,6 +345,45 @@ def rex_look() -> list:
     if REX_RADIUS in text:
         path.write_text(text.replace(REX_RADIUS, "    static let radius: CGFloat = 18\n", 1), encoding="utf-8")
         done.append("radius")
+    return done
+
+
+def rex_skin() -> list:
+    """Rex's chrome: the app stays dark, cards are flat instead of glassy, and the old default theme moves to Rex."""
+    done = []
+
+    path = ROOT / "App/ColorThemes.swift"
+    text = path.read_text(encoding="utf-8")
+    before = text
+    if REX_STORED in text:
+        text = text.replace(REX_STORED,
+                            "        let stored = defaults.string(forKey: Self.key).flatMap(ColorTheme.init(rawValue:))\n"
+                            "        // Rex is the app's look now: a viewer left on the old default (Classic) moves with it.\n"
+                            "        current = stored.map { $0 == .classic ? .rex : $0 } ?? .standard\n"
+                            "        if stored == .classic { defaults.removeObject(forKey: Self.key) }\n", 1)
+        done.append("migrate")
+    if REX_TINT in text:
+        text = text.replace(REX_TINT,
+                            "    func body(content: Content) -> some View { content.tint(Brand.accent)"
+                            ".preferredColorScheme(ColorThemes.shared.customScheme ?? .dark) }\n", 1)
+        done.append("dark")
+    if text != before:
+        path.write_text(text, encoding="utf-8")
+
+    path = ROOT / "App/GlassKit.swift"
+    text = path.read_text(encoding="utf-8")
+    if REX_MATERIAL in text:
+        path.write_text(text.replace(REX_MATERIAL,
+                                     "                shape.fill(ColorThemes.shared.current.palette.panel)"
+                                     ".overlay { if let tint = style.tint { shape.fill(tint) } }\n", 1),
+                        encoding="utf-8")
+        done.append("flat")
+
+    path = ROOT / "Sources/TVCore/LiquidGlassSupport.swift"
+    text = path.read_text(encoding="utf-8")
+    if REX_GLASS in text:
+        path.write_text(text.replace(REX_GLASS, "    public static let current = false\n", 1), encoding="utf-8")
+        done.append("solid")
     return done
 
 
@@ -361,6 +414,8 @@ if __name__ == "__main__":
           if arrange_settings_top() else "top of Settings already arranged")
     look = rex_look()
     print(f"Rex look applied ({', '.join(look)})" if look else "Rex look already applied")
+    skin = rex_skin()
+    print(f"Rex chrome applied ({', '.join(skin)})" if skin else "Rex chrome already applied")
     print("Discover's toolbar opens the following calendar"
           if add_watch_calendar() else "Discover's toolbar already has the calendar")
 
